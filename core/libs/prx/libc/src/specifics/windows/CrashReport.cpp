@@ -1,7 +1,7 @@
 #ifdef _WIN32
 #include <windows.h>
 #include <tlhelp32.h>
-#include "prx/libc/include/CallTrace.hpp"
+#include "prx/libc/include/CallTraceInternal.hpp"
 #include "prx/libc/include/FailureReport.hpp"
 #include "prx/libc/include/GuestArena.hpp"
 #include "prx/libc/include/Shutdown.hpp"
@@ -477,35 +477,27 @@ LONG WINAPI ReportCrash(EXCEPTION_POINTERS* info) {
     return EXCEPTION_CONTINUE_SEARCH;
 }
 
+void WriteCallTraceText(const char* text, std::size_t length) {
+    DWORD written = 0;
+    WriteFile(GetStdHandle(STD_ERROR_HANDLE), text, static_cast<DWORD>(length), &written, nullptr);
+}
+
+bool LookupCallTraceModule(std::uint64_t address, char* name, std::size_t capacity, std::uint64_t* base) {
+    HMODULE module = nullptr;
+    if (!GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, reinterpret_cast<LPCSTR>(address), &module) || !module) return false;
+    char path[MAX_PATH] = "?";
+    GetModuleFileNameA(module, path, sizeof(path));
+    const char* file = path;
+    for (const char* cursor = path; *cursor; ++cursor) {
+        if (*cursor == '\\' || *cursor == '/') file = cursor + 1;
+    }
+    std::snprintf(name, capacity, "%s", file);
+    *base = reinterpret_cast<std::uint64_t>(module);
+    return true;
+}
+
 void ReportCallTrace() {
-    static CallTraceEntry entries[64];
-    const std::size_t count = CopyCallTrace_nid_no_patch(entries, std::size(entries));
-    if (count == 0) return;
-    char line[MAX_PATH + 64];
-    Report("  last traced system library calls (APS5_TRACE_CALLS):\n");
-    for (std::size_t index = 0; index < count; ++index) {
-        DescribeAddress(entries[index].returnAddress, line, sizeof(line));
-        Report("    #%llu thread %llu %s %s from %s\n", static_cast<unsigned long long>(entries[index].sequence),
-            static_cast<unsigned long long>(entries[index].thread), entries[index].library, entries[index].name, line);
-    }
-    static CallTraceEntry own[32];
-    const std::uint64_t thread = GetCurrentThreadId();
-    const std::size_t owned = CopyThreadCallTrace_nid_no_patch(thread, own, std::size(own));
-    if (owned != 0) {
-        Report("  last traced calls of thread %llu:\n", static_cast<unsigned long long>(thread));
-        for (std::size_t index = 0; index < owned; ++index) {
-            DescribeAddress(own[index].returnAddress, line, sizeof(line));
-            Report("    #%llu %s %s from %s\n", static_cast<unsigned long long>(own[index].sequence), own[index].library, own[index].name, line);
-        }
-    }
-    static CallTraceCount counts[32];
-    std::uint64_t total = 0;
-    const std::size_t counted = CopyCallCounts_nid_no_patch(counts, std::size(counts), &total);
-    if (counted == 0) return;
-    Report("  most called traced imports (%llu calls in total):\n", static_cast<unsigned long long>(total));
-    for (std::size_t index = 0; index < counted; ++index) {
-        Report("    %12llu %s %s\n", static_cast<unsigned long long>(counts[index].calls), counts[index].library, counts[index].name);
-    }
+    CallTraceWriteReport_nid_no_patch(WriteCallTraceText, LookupCallTraceModule);
 }
 
 std::size_t CaptureFrames(const CONTEXT* context, std::uint64_t* frames, std::size_t capacity) {
