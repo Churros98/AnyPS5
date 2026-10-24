@@ -1,14 +1,20 @@
+#include "Mcp.hpp"
 #include "Monitor.hpp"
+#ifdef _WIN32
+#include <fcntl.h>
+#include <io.h>
+#endif
 #include <cstdio>
 #include <cstdlib>
 #include <exception>
+#include <iostream>
 #include <stdexcept>
 #include <string>
 #include <string_view>
 
 namespace {
 
-constexpr const char* Usage = "usage: anyps5-monitor [--pid <pid>] [--nid-names <file>] [--window <seconds>] [--dump [--seconds <seconds>]]\n";
+constexpr const char* Usage = "usage: anyps5-monitor [--pid <pid>] [--nid-names <file>] [--window <seconds>] [--dump [--seconds <seconds>] | --mcp]\n";
 
 double ParseSeconds(std::string_view option, const char* value) {
     char* end = nullptr;
@@ -36,6 +42,8 @@ Monitor::Options ParseOptions(int argc, char** argv) {
             options.windowSeconds = ParseSeconds(argument, value());
         } else if (argument == "--dump") {
             options.dump = true;
+        } else if (argument == "--mcp") {
+            options.mcp = true;
         } else if (argument == "--seconds") {
             options.dumpSeconds = ParseSeconds(argument, value());
         } else if (argument == "--help") {
@@ -45,6 +53,7 @@ Monitor::Options ParseOptions(int argc, char** argv) {
             throw std::runtime_error("unknown argument " + std::string(argument) + "\n" + Usage);
         }
     }
+    if (options.dump && options.mcp) throw std::runtime_error("--dump and --mcp cannot be combined");
     return options;
 }
 
@@ -57,6 +66,13 @@ int main(int argc, char** argv) {
         session.SetWindow(options.windowSeconds);
         if (!options.names.empty()) session.LoadNames(options.names);
         else if (!session.LoadDefaultNames()) std::fprintf(stderr, "anyps5-monitor: import names stay NIDs: no NID database at %s; run python3 tools/nid_names.py once to download it, or pass --nid-names\n", Monitor::Session::DefaultNamesPath().string().c_str());
+        if (options.mcp) {
+#ifdef _WIN32
+            _setmode(_fileno(stdin), _O_BINARY);
+            _setmode(_fileno(stdout), _O_BINARY);
+#endif
+            return Monitor::RunMcp(session, options.pid, std::cin, std::cout);
+        }
         if (options.dump) {
             std::uint64_t pid = options.pid;
             if (pid == 0) {

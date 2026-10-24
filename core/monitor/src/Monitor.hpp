@@ -12,6 +12,7 @@ struct Options {
     std::string names;
     double windowSeconds = 1.0;
     bool dump = false;
+    bool mcp = false;
     double dumpSeconds = 1.5;
 };
 

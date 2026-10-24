@@ -19,7 +19,11 @@ target_include_directories(anyps5_imgui PUBLIC
 target_compile_definitions(anyps5_imgui PUBLIC IMGUI_IMPL_VULKAN_NO_PROTOTYPES VK_NO_PROTOTYPES)
 target_link_libraries(anyps5_imgui PUBLIC SDL2-static)
 
-add_library(anyps5_monitor_session STATIC ${CMAKE_CURRENT_SOURCE_DIR}/src/Session.cpp)
+add_library(anyps5_monitor_session STATIC
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/Session.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/Json.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/Mcp.cpp
+)
 target_include_directories(anyps5_monitor_session PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/core/libs)
 
 add_executable(anyps5_monitor

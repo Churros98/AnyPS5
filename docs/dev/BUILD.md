@@ -200,6 +200,28 @@ Without `--pid` the window connects to the process with the highest id listed in
 
 `--dump` waits `--seconds` (default 1.5), prints the same figures as text and exits with 0, or 2 when the process stopped publishing. The `anyps5_monitor_dump` test runs it against `guest_telemetry_tests`. The limits are listed in the [monitor](debt/monitor.md) technical debt.
 
+### MCP server
+
+`anyps5-monitor --mcp` serves the same figures to an AI agent as a [Model Context Protocol](https://modelcontextprotocol.io) server over standard input and output: one JSON-RPC 2.0 message per line, protocol versions 2025-06-18, 2025-03-26 and 2024-11-05, tools only, read-only. It opens no window and polls the telemetry every 50 ms; `--pid`, `--nid-names` and `--window` apply as for the window. Register it with Claude Code from the build directory:
+
+```
+claude mcp add anyps5 -- <build>/core/monitor/anyps5-monitor --mcp
+```
+
+| Tool | Returns |
+|------|---------|
+| `list_processes` | the process ids that publish telemetry and the one being read |
+| `connect` | reads `pid`, or the only publishing process without it |
+| `get_summary` | frames per second, frame time percentiles, GPU and agc driver time per frame (null when not timed) and the verdict of the Budget tab |
+| `get_imports` | imports sorted by `sort_by` (`exclusive`, `inclusive`, `calls`, `average`, `p99`, `max`, `total`), filtered by `filter`, at most `limit`, over `window_seconds` |
+| `get_threads` | milliseconds per second each thread spends in traced imports |
+| `get_slow_calls` | slow calls after `since`, at least `min_ms` long, with `next_since` for the next request |
+| `get_frames` | the last `count` frames |
+| `get_recent_calls` | the newest traced calls with thread and caller |
+| `sample` | waits `seconds`, then returns the summary, the busiest imports and threads and the slow calls of the sample |
+
+Without a connected process every tool except `list_processes` connects as `connect` does, or reports that no process or several publish. Each result is a text block holding the JSON and the same object as `structuredContent`. Invalid arguments are JSON-RPC errors (-32602) and failures of a valid call are tool results with `isError`. `anyps5_monitor_mcp` checks the parser, every tool and a run of the executable.
+
 ## Compute pipeline replay
 
 Build `agc_compute_pipeline_replay` in the full build with `-DANYPS5_ENABLE_SPIRV_TOOLS=ON`; replay validates the captured module before calling Vulkan. Set `APS5_DUMP_COMPUTE_PIPELINES` to a dedicated empty directory before starting a title to save each uncached compute pipeline's final SPIR-V, descriptor layouts, push constant ranges, specialization values, subgroup size and creation flags before compilation. Files are named `compute-<identity>/capture.aps5cp`; identical records are deduplicated. The pipelines of the start-up f32 denormal flush probe are not captured. Capture stops with an error at 128 records, 256 MiB total or 36 MiB per record (at most 8,388,608 SPIR-V words, or 32 MiB of shader code). Capture files contain shader code and device metadata, but no guest buffers or textures; review them before sharing.
