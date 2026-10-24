@@ -1,12 +1,14 @@
 #include "Json.hpp"
 #include "Mcp.hpp"
 #include "Session.hpp"
+#include "Snapshots.hpp"
 #include "prx/libc/include/CallTrace.hpp"
 #include "prx/libc/include/Telemetry.hpp"
 #include "prx/libc/include/general/VabiMacros.hpp"
 #ifdef _WIN32
 #include <windows.h>
 #else
+#include <dlfcn.h>
 #include <unistd.h>
 #endif
 #include <atomic>
@@ -109,7 +111,9 @@ static void CheckServer(Monitor::McpServer& server) {
         names.push_back(tool.Find("name")->AsString());
         Require(!tool.Find("description")->AsString().empty() && tool.Find("inputSchema")->Find("type")->AsString() == "object");
     }
-    Require(names == std::vector<std::string>{"list_processes", "connect", "get_summary", "get_imports", "get_threads", "get_slow_calls", "get_frames", "get_recent_calls", "sample"});
+    Require(names == std::vector<std::string>{"list_processes", "connect", "get_summary", "get_imports", "get_threads", "get_slow_calls", "get_frames", "get_recent_calls", "sample", "resolve_address",
+        "list_modules", "sample_stacks", "watch_import", "get_watched_calls", "get_driver_phases", "set_slow_threshold", "save_snapshot", "list_snapshots", "compare_snapshots", "list_memory_regions",
+        "read_memory", "search_memory"});
 
     const Json parseError = Json::Parse(server.Handle("{oops"));
     Require(ErrorCode(parseError) == -32700 && parseError.Find("id")->IsNull());
@@ -152,6 +156,199 @@ static void CheckServer(Monitor::McpServer& server) {
     Require(!Tool(server, 19, "get_threads").Find("structuredContent")->Find("threads")->Items().empty());
     const Json recent = *Tool(server, 20, "get_recent_calls", Json::Object({{"limit", 3}})).Find("structuredContent");
     Require(recent.Find("calls")->Items().size() == 3 && recent.Find("calls")->Items().back().Find("name")->AsString() == "Nap");
+}
+
+[[gnu::noinline]] static std::uint64_t APS5_VABI Outer(std::uint64_t value) {
+    return value * 3 + 1;
+}
+
+static std::string ModuleName() {
+#ifdef _WIN32
+    char path[MAX_PATH];
+    Require(GetModuleFileNameA(nullptr, path, sizeof(path)) != 0);
+    return std::filesystem::path(path).filename().string();
+#else
+    return std::filesystem::read_symlink("/proc/self/exe").filename().string();
+#endif
+}
+
+static std::uint64_t ModuleBase() {
+#ifdef _WIN32
+    return reinterpret_cast<std::uint64_t>(GetModuleHandleA(nullptr));
+#else
+    Dl_info info{};
+    Require(dladdr(reinterpret_cast<const void*>(&Outer), &info) != 0);
+    return reinterpret_cast<std::uint64_t>(info.dli_fbase);
+#endif
+}
+
+static std::string Hex(std::uint64_t value) {
+    char buffer[24];
+    std::snprintf(buffer, sizeof(buffer), "0x%llx", static_cast<unsigned long long>(value));
+    return buffer;
+}
+
+static std::filesystem::path g_stackFile;
+
+static bool FakeSampler(std::uint64_t, std::uint64_t, std::uint64_t, char* message, std::size_t capacity) {
+    const std::string module = ModuleName();
+    const std::uint64_t base = ModuleBase();
+    const std::string outer = module + "+" + Hex(reinterpret_cast<std::uint64_t>(&Outer) - base + 1);
+    const std::string leaf = module + "+" + Hex(reinterpret_cast<std::uint64_t>(&Nap) - base + 1);
+    std::ofstream file(g_stackFile, std::ios::binary);
+    file << "# rounds=10 threads=1 interval_us=1000 depth=4 duration_ms=10\n";
+    file << "# module " << module << " " << Hex(base) << " 0x1000\n";
+    file << "thread-77;[truncated];" << outer << ";" << leaf << " 7\n";
+    file << "thread-77;" << outer << " 3\n";
+    file << "thread-78;" << outer << " 5\n";
+#ifdef _WIN32
+    const HMODULE ntdll = GetModuleHandleA("ntdll.dll");
+    const auto wait = reinterpret_cast<std::uint64_t>(reinterpret_cast<void*>(GetProcAddress(ntdll, "NtWaitForSingleObject")));
+    file << "thread-79;" << outer << ";ntdll.dll+" << Hex(wait - reinterpret_cast<std::uint64_t>(ntdll) + 4) << " 4\n";
+#endif
+    std::snprintf(message, capacity, "%s", g_stackFile.string().c_str());
+    return true;
+}
+
+static bool HasText(const Json& value, const char* field, const char* part) {
+    const Json* text = value.Find(field);
+    return text != nullptr && text->Type() == Json::Kind::String && text->AsString().find(part) != std::string::npos;
+}
+
+static void CheckAgentTools(Monitor::McpServer& server) {
+    const std::string module = ModuleName();
+    const std::uint64_t base = ModuleBase();
+
+    const Json modules = *Tool(server, 30, "list_modules", Json::Object({{"filter", module}})).Find("structuredContent");
+    Require(modules.Find("modules")->Items().size() == 1 && std::strtoull(modules.Find("modules")->Items()[0].Find("base")->AsString().c_str(), nullptr, 16) == base);
+    const std::string napAddress = Hex(reinterpret_cast<std::uint64_t>(&Nap) + 2);
+    const std::string napOffset = module + "+" + Hex(reinterpret_cast<std::uint64_t>(&Nap) - base + 2);
+    Json addresses = Json::Array();
+    addresses.Push(napAddress);
+    addresses.Push(napOffset);
+    const Json located = Tool(server, 32, "resolve_address", Json::Object({{"addresses", addresses}}));
+    Require(!located.Find("isError")->AsBoolean());
+    for (const Json& entry : located.Find("structuredContent")->Find("addresses")->Items()) {
+        Require(entry.Find("module")->AsString() == module && entry.Find("offset")->AsString().ends_with(Hex(reinterpret_cast<std::uint64_t>(&Nap) - base + 2).substr(2)));
+#ifdef _WIN32
+        Require(HasText(entry, "function", "Nap") && entry.Find("function_offset")->AsString() == "0x0000000000000002");
+#endif
+    }
+    Require(ErrorCode(Call(server, 33, "tools/call", Json::Object({{"name", "resolve_address"}, {"arguments", Json::Object({{"addresses", Json::Array()}})}}))) == -32602);
+    Json nowhere = Json::Array();
+    nowhere.Push("nowhere.prx+0x10");
+    Require(ErrorCode(Call(server, 34, "tools/call", Json::Object({{"name", "resolve_address"}, {"arguments", Json::Object({{"addresses", nowhere}})}}))) == -32602);
+
+    const Json noSampler = Tool(server, 35, "sample_stacks", Json::Object({{"milliseconds", 10}}));
+    Require(noSampler.Find("isError")->AsBoolean() && HasText(*noSampler.Find("content")->Items().begin(), "text", "no stack sampler"));
+    g_stackFile = std::filesystem::temp_directory_path() / ("anyps5-monitor-mcp-stacks-" + std::to_string(ProcessId()) + ".txt");
+    TelemetryRegisterStackSampler_nid_no_patch(&FakeSampler);
+    const Json stacks = *Tool(server, 36, "sample_stacks", Json::Object({{"milliseconds", 10}, {"top", 3}})).Find("structuredContent");
+    std::filesystem::remove(g_stackFile);
+    Require(stacks.Find("samples")->AsNumber() == 15 && stacks.Find("threads")->Items().size() == 2);
+#ifdef _WIN32
+    Require(stacks.Find("waiting_samples_left_out")->AsNumber() == 4);
+    const Json withWaits = *Tool(server, 64, "sample_stacks", Json::Object({{"milliseconds", 10}, {"include_waits", true}})).Find("structuredContent");
+    std::filesystem::remove(g_stackFile);
+    Require(withWaits.Find("samples")->AsNumber() == 19 && withWaits.Find("waiting_samples_left_out")->AsNumber() == 0 && withWaits.Find("threads")->Items().size() == 3);
+#endif
+    Require(stacks.Find("self")->Items()[0].Find("samples")->AsNumber() == 8 && stacks.Find("inclusive")->Items()[0].Find("samples")->AsNumber() == 15);
+    Require(stacks.Find("stacks")->Items()[0].Find("samples")->AsNumber() == 7 && stacks.Find("stacks")->Items()[0].Find("frames_leaf_first")->Items().size() == 2);
+#ifdef _WIN32
+    Require(HasText(stacks.Find("self")->Items()[0], "function", "Outer") && HasText(stacks.Find("self")->Items()[1], "function", "Nap"));
+    Require(HasText(stacks.Find("inclusive")->Items()[0], "function", "Outer"));
+#endif
+    const Json filtered = *Tool(server, 37, "sample_stacks", Json::Object({{"milliseconds", 10}, {"thread", 78}})).Find("structuredContent");
+    std::filesystem::remove(g_stackFile);
+    Require(filtered.Find("samples")->AsNumber() == 5);
+    Require(ErrorCode(Call(server, 38, "tools/call", Json::Object({{"name", "sample_stacks"}, {"arguments", Json::Object({{"depth", 65}})}}))) == -32602);
+
+    Require(Tool(server, 39, "watch_import", Json::Object({{"import", "Missing"}})).Find("isError")->AsBoolean());
+    Require(ErrorCode(Call(server, 40, "tools/call", Json::Object({{"name", "watch_import"}, {"arguments", Json::Object({{"import", "Nap"}, {"count", 2000}})}}))) == -32602);
+    const Json watching = *Tool(server, 41, "watch_import", Json::Object({{"import", "Nap"}, {"count", 3}})).Find("structuredContent");
+    Require(HasText(watching, "message", "watching the next 3 calls"));
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    Json watched;
+    do {
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        watched = *Tool(server, 42, "get_watched_calls").Find("structuredContent");
+    } while (watched.Find("calls")->Items().size() < 3 && std::chrono::steady_clock::now() < deadline);
+    Require(watched.Find("calls")->Items().size() == 3);
+    for (const Json& call : watched.Find("calls")->Items()) {
+        Require(call.Find("import")->AsString() == "Nap" && call.Find("arguments")->Items()[0].AsString() == "0x000000000000000a" && call.Find("ms")->AsNumber() >= 9);
+        Require(call.Find("caller")->Find("module")->AsString() == module);
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    Require(Tool(server, 43, "get_watched_calls", Json::Object({{"since", watched.Find("next_since")->AsNumber()}})).Find("structuredContent")->Find("calls")->Items().empty());
+
+    const Json noPhases = *Tool(server, 44, "get_driver_phases").Find("structuredContent");
+    Require(noPhases.Find("phases")->Items().empty() && HasText(noPhases, "note", "APS5_TRACE_SUMMARY_EVERY"));
+    const Telemetry::PhaseTotal first[] = {{"queue 0", "Driver.Packet", "draw", 1000000, 10}, {"presenter", "Driver.Present", "", 2000000, 4}};
+    TelemetryPublishPhases_nid_no_patch(first, 2);
+    std::this_thread::sleep_for(std::chrono::milliseconds(250));
+    Require(!Tool(server, 63, "get_summary").Find("isError")->AsBoolean());
+    const Telemetry::PhaseTotal second[] = {{"queue 0", "Driver.Packet", "draw", 301000000, 110}, {"presenter", "Driver.Present", "", 2000000, 4}};
+    TelemetryPublishPhases_nid_no_patch(second, 2);
+    std::this_thread::sleep_for(std::chrono::milliseconds(700));
+    const Json phases = *Tool(server, 45, "get_driver_phases", Json::Object({{"filter", "queue"}})).Find("structuredContent");
+    Require(phases.Find("phases")->Items().size() == 1);
+    const Json& packet = phases.Find("phases")->Items()[0];
+    Require(packet.Find("phase")->AsString() == "Driver.Packet.draw" && packet.Find("thread")->AsString() == "queue 0" && packet.Find("total_ms")->AsNumber() == 301 && packet.Find("count")->AsNumber() == 110);
+    Require(packet.Find("ms_per_s")->AsNumber() > 100 && packet.Find("average_us")->AsNumber() > 2999 && packet.Find("average_us")->AsNumber() < 3001);
+
+    const Json threshold = *Tool(server, 46, "set_slow_threshold", Json::Object({{"microseconds", 5000}})).Find("structuredContent");
+    Require(threshold.Find("threshold_us")->AsNumber() == 5000 && threshold.Find("threshold_ticks")->AsNumber() > 0);
+    const double slowUs = Tool(server, 47, "get_slow_calls").Find("structuredContent")->Find("threshold_us")->AsNumber();
+    Require(slowUs > 4900 && slowUs < 5100);
+    Require(ErrorCode(Call(server, 48, "tools/call", Json::Object({{"name", "set_slow_threshold"}, {"arguments", Json::Object()}}))) == -32602);
+
+    const std::string before = "mcp-test-" + std::to_string(ProcessId()) + "-before";
+    const std::string after = "mcp-test-" + std::to_string(ProcessId()) + "-after";
+    Require(Tool(server, 49, "save_snapshot", Json::Object({{"name", before}, {"note", "test"}})).Find("structuredContent")->Find("imports")->AsNumber() >= 1);
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    Require(!Tool(server, 50, "save_snapshot", Json::Object({{"name", after}})).Find("isError")->AsBoolean());
+    Require(ErrorCode(Call(server, 51, "tools/call", Json::Object({{"name", "save_snapshot"}, {"arguments", Json::Object({{"name", "../escape"}})}}))) == -32602);
+    std::size_t listedSnapshots = 0;
+    const Json snapshots = Tool(server, 52, "list_snapshots");
+    for (const Json& snapshot : snapshots.Find("structuredContent")->Find("snapshots")->Items()) {
+        if (snapshot.Find("name")->AsString() == before || snapshot.Find("name")->AsString() == after) ++listedSnapshots;
+    }
+    Require(listedSnapshots == 2);
+    const Json compared = *Tool(server, 53, "compare_snapshots", Json::Object({{"before", before}, {"after", after}})).Find("structuredContent");
+    Require(compared.Find("frames")->Find("fps")->Find("before")->AsNumber() > 0 && compared.Find("frames")->Find("fps")->Find("after")->AsNumber() > 0);
+    Require(compared.Find("imports")->Items()[0].Find("name")->AsString() == "Nap" && compared.Find("imports")->Items()[0].Find("exclusive_ms_per_s")->Find("change") != nullptr);
+    Require(Tool(server, 54, "compare_snapshots", Json::Object({{"before", before}, {"after", "mcp-test-missing"}})).Find("isError")->AsBoolean());
+    std::filesystem::remove(Monitor::SnapshotDirectory() / (before + ".json"));
+    std::filesystem::remove(Monitor::SnapshotDirectory() / (after + ".json"));
+
+    static std::uint32_t values[4] = {1, 2, 3, 4};
+    const std::string needle = "needle-" + std::to_string(ProcessId() * 7919 + 13);
+    std::vector<char> buffer(needle.begin(), needle.end());
+    buffer.push_back('\0');
+    const auto bufferAddress = reinterpret_cast<std::uint64_t>(buffer.data());
+    const Json regions = *Tool(server, 55, "list_memory_regions", Json::Object({{"limit", 100000}})).Find("structuredContent");
+    bool covered = false;
+    for (const Json& region : regions.Find("regions")->Items()) {
+        const std::uint64_t start = std::strtoull(region.Find("base")->AsString().c_str(), nullptr, 16);
+        covered = covered || (bufferAddress >= start && bufferAddress < start + static_cast<std::uint64_t>(region.Find("size")->AsNumber()));
+    }
+    Require(covered && regions.Find("committed_bytes")->AsNumber() > 0);
+    Require(!Tool(server, 56, "list_memory_regions", Json::Object({{"module", module}})).Find("structuredContent")->Find("regions")->Items().empty());
+    const Json text = *Tool(server, 57, "read_memory", Json::Object({{"address", Hex(bufferAddress)}, {"size", static_cast<double>(buffer.size())}, {"as", "string"}})).Find("structuredContent");
+    Require(text.Find("value")->AsString() == needle && text.Find("read")->AsNumber() == static_cast<double>(buffer.size()) && text.Find("hex")->Items()[0].AsString().find("6e 65 65 64") != std::string::npos);
+    const Json numbers = *Tool(server, 58, "read_memory", Json::Object({{"address", Hex(reinterpret_cast<std::uint64_t>(values))}, {"size", 16}, {"as", "u32"}})).Find("structuredContent");
+    Require(numbers.Find("values")->Items().size() == 4 && numbers.Find("values")->Items()[3].AsNumber() == 4);
+    Require(Tool(server, 59, "read_memory", Json::Object({{"address", "0x10"}, {"size", 16}})).Find("structuredContent")->Find("read")->AsNumber() == 0);
+    const Json search = *Tool(server, 60, "search_memory", Json::Object({{"value", needle}, {"limit", 1000}, {"max_mb", 16384}})).Find("structuredContent");
+    bool foundBuffer = false;
+    for (const Json& match : search.Find("matches")->Items()) foundBuffer = foundBuffer || std::strtoull(match.Find("address")->AsString().c_str(), nullptr, 16) == bufferAddress;
+    Require(foundBuffer);
+    const Json integers = *Tool(server, 61, "search_memory", Json::Object({{"value", "0x0000000300000002"}, {"type", "u64"}, {"limit", 1000}, {"max_mb", 16384}})).Find("structuredContent");
+    bool foundValues = false;
+    for (const Json& match : integers.Find("matches")->Items()) foundValues = foundValues || std::strtoull(match.Find("address")->AsString().c_str(), nullptr, 16) == reinterpret_cast<std::uint64_t>(&values[1]);
+    Require(foundValues);
+    Require(ErrorCode(Call(server, 62, "tools/call", Json::Object({{"name", "search_memory"}, {"arguments", Json::Object({{"value", "zz"}, {"type", "bytes"}})}}))) == -32602);
+    Require(Outer(1) == 4);
 }
 
 static void CheckProcess(const char* monitor) {
@@ -207,6 +404,7 @@ int main(int argc, char** argv) {
     std::mutex mutex;
     Monitor::McpServer server(session, mutex, 0);
     CheckServer(server);
+    CheckAgentTools(server);
 
     std::istringstream in(R"({"jsonrpc":"2.0","id":1,"method":"ping"})" "\n" R"({"jsonrpc":"2.0","method":"notifications/initialized"})" "\n" R"({"jsonrpc":"2.0","id":2,"method":"tools/list"})" "\n");
     std::ostringstream out;
@@ -215,7 +413,7 @@ int main(int argc, char** argv) {
     std::istringstream lines(out.str());
     std::vector<std::string> responses;
     for (std::string line; std::getline(lines, line);) responses.push_back(line);
-    Require(responses.size() == 2 && Json::Parse(responses[0]).Find("id")->AsNumber() == 1 && Json::Parse(responses[1]).Find("result")->Find("tools")->Items().size() == 9);
+    Require(responses.size() == 2 && Json::Parse(responses[0]).Find("id")->AsNumber() == 1 && Json::Parse(responses[1]).Find("result")->Find("tools")->Items().size() == 22);
 
     if (argc == 2) CheckProcess(argv[1]);
     running = false;

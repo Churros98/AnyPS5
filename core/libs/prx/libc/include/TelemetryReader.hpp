@@ -75,15 +75,25 @@ public:
         Close();
         const std::string name = MappingName(pid);
 #ifdef _WIN32
-        _mapping = OpenFileMappingA(FILE_MAP_READ, FALSE, name.c_str());
+        _writable = true;
+        _mapping = OpenFileMappingA(FILE_MAP_READ | FILE_MAP_WRITE, FALSE, name.c_str());
+        if (_mapping == nullptr) {
+            _writable = false;
+            _mapping = OpenFileMappingA(FILE_MAP_READ, FALSE, name.c_str());
+        }
         if (_mapping == nullptr) return false;
-        _block = static_cast<const Block*>(MapViewOfFile(_mapping, FILE_MAP_READ, 0, 0, sizeof(Block)));
+        _block = static_cast<Block*>(MapViewOfFile(_mapping, _writable ? FILE_MAP_READ | FILE_MAP_WRITE : FILE_MAP_READ, 0, 0, sizeof(Block)));
 #else
-        const int file = shm_open(name.c_str(), O_RDONLY, 0);
+        _writable = true;
+        int file = shm_open(name.c_str(), O_RDWR, 0);
+        if (file < 0) {
+            _writable = false;
+            file = shm_open(name.c_str(), O_RDONLY, 0);
+        }
         if (file < 0) return false;
-        void* view = mmap(nullptr, sizeof(Block), PROT_READ, MAP_SHARED, file, 0);
+        void* view = mmap(nullptr, sizeof(Block), _writable ? PROT_READ | PROT_WRITE : PROT_READ, MAP_SHARED, file, 0);
         close(file);
-        _block = view == MAP_FAILED ? nullptr : static_cast<const Block*>(view);
+        _block = view == MAP_FAILED ? nullptr : static_cast<Block*>(view);
 #endif
         if (_block != nullptr && _block->header.magic == Magic && _block->header.version == Version && _block->header.totalBytes == sizeof(Block)) return true;
         Close();
@@ -96,7 +106,7 @@ public:
         if (_mapping != nullptr) CloseHandle(_mapping);
         _mapping = nullptr;
 #else
-        if (_block != nullptr) munmap(const_cast<Block*>(_block), sizeof(Block));
+        if (_block != nullptr) munmap(_block, sizeof(Block));
 #endif
         _block = nullptr;
     }
@@ -122,7 +132,48 @@ public:
         header.framesWritten = Load(source.framesWritten);
         header.slowWritten = Load(source.slowWritten);
         header.recentWritten = Load(source.recentWritten);
+        header.commandsWritten = Load(source.commandsWritten);
+        header.watchedWritten = Load(source.watchedWritten);
+        header.phases = Load(source.phases);
+        header.phasesPublishes = Load(source.phasesPublishes);
         return header;
+    }
+
+    bool Writable() const {
+        return _block != nullptr && _writable;
+    }
+
+    std::uint64_t SendCommand(CommandKind kind, std::uint64_t first, std::uint64_t second = 0, std::uint64_t third = 0) {
+        if (!Writable()) return 0;
+        const std::uint64_t index = std::atomic_ref<std::uint64_t>(_block->header.commandsWritten).fetch_add(1, std::memory_order_acq_rel) + 1;
+        Command& command = _block->commands[index % CommandCapacity];
+        Store(command.sequence, index * 2 - 1);
+        std::atomic_thread_fence(std::memory_order_release);
+        command.kind = static_cast<std::uint64_t>(kind);
+        command.arguments[0] = first;
+        command.arguments[1] = second;
+        command.arguments[2] = third;
+        command.arguments[3] = 0;
+        Store(command.sequence, index * 2);
+        return index;
+    }
+
+    bool ReadResponse(std::uint64_t index, Response& response) const {
+        return ReadEntry(_block->responses[index % CommandCapacity], response, index * 2);
+    }
+
+    std::vector<WatchedCall> ReadWatchedCalls(std::uint64_t after = 0) const {
+        return ReadRing(_block->watched, Load(_block->header.watchedWritten), after);
+    }
+
+    std::vector<Phase> ReadPhases() const {
+        std::vector<Phase> phases;
+        const std::uint64_t count = std::min<std::uint64_t>(Load(_block->header.phases), PhaseCapacity);
+        for (std::uint64_t index = 0; index < count; ++index) {
+            Phase entry{};
+            if (ReadEntry(_block->phases[index], entry)) phases.push_back(entry);
+        }
+        return phases;
     }
 
     std::vector<Frame> ReadFrames(std::uint64_t after = 0) const {
@@ -159,7 +210,8 @@ public:
     }
 
 private:
-    const Block* _block = nullptr;
+    Block* _block = nullptr;
+    bool _writable = false;
 #ifdef _WIN32
     HANDLE _mapping = nullptr;
 #endif

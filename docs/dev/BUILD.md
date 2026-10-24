@@ -175,7 +175,7 @@ With `APS5_PROFILE_CALLS=<seconds>`, every `<seconds>` seconds a thread prints a
 
 ### Telemetry
 
-With the flag, the first traced import or present makes libc create a shared memory block named `Local\AnyPS5-Telemetry-<pid>` on Windows and `/anyps5-telemetry-<pid>` (mode 0600, removed at exit) on Linux, and writes the block's name to `<temp>/anyps5-telemetry/<pid>` so that a monitor can find the process. The layout is [Telemetry.hpp](../../core/libs/prx/libc/include/Telemetry.hpp) (version 1) and [TelemetryReader.hpp](../../core/libs/prx/libc/include/TelemetryReader.hpp) reads it without locks:
+With the flag, the first traced import or present makes libc create a shared memory block named `Local\AnyPS5-Telemetry-<pid>` on Windows and `/anyps5-telemetry-<pid>` (mode 0600, removed at exit) on Linux, and writes the block's name to `<temp>/anyps5-telemetry/<pid>` so that a monitor can find the process. The layout is [Telemetry.hpp](../../core/libs/prx/libc/include/Telemetry.hpp) (version 2) and [TelemetryReader.hpp](../../core/libs/prx/libc/include/TelemetryReader.hpp) reads it without locks:
 
 - Every present the agc driver appends its steady-clock time, the GPU and driver nanoseconds since start (zero unless `APS5_PROFILE_GPU` or `APS5_PROFILE_DRAW` is set, as the flags say), draws and dispatches since start to a ring of 1024 frames.
 - Every 100 ms a thread copies the call profile of up to 4096 imports and 256 threads (timed calls and the time of the calls made outside other traced calls), the profiler's rate and cost, and appends the traced calls made since the last copy to a ring of the 64 newest.
@@ -219,6 +219,17 @@ claude mcp add anyps5 -- <build>/core/monitor/anyps5-monitor --mcp
 | `get_frames` | the last `count` frames |
 | `get_recent_calls` | the newest traced calls with thread and caller |
 | `sample` | waits `seconds`, then returns the summary, the busiest imports and threads and the slow calls of the sample |
+| `resolve_address` | the module, offset and nearest function of each address (`0x...` or `module+0x...`) |
+| `list_modules` | the modules of the process with base, size and path |
+| `sample_stacks` | samples every thread for `milliseconds` every `interval_us` up to `depth` frames, then returns the functions with the most own and total samples and the hottest stacks |
+| `watch_import` | records the next `count` calls of a timed import |
+| `get_watched_calls` | the recorded calls with `rdi`, `rsi`, `rdx`, `rcx`, `r8`, `r9`, the return value, the duration and the caller |
+| `get_driver_phases` | the `PerformanceTimer` scopes of every traced agc driver thread with milliseconds per second and mean duration |
+| `set_slow_threshold` | changes `APS5_MONITOR_SLOW_US` of the running title |
+| `save_snapshot`, `list_snapshots`, `compare_snapshots` | store the summary and the import, thread and phase rates under a name in `<temp>/anyps5-telemetry/snapshots`, and compare two of them |
+| `list_memory_regions`, `read_memory`, `search_memory` | the committed regions of the process, its bytes as hex or values, and the addresses of a value; they only read |
+
+`sample_stacks`, `watch_import` and `set_slow_threshold` are commands: the monitor writes them to a ring of 16 in the telemetry block and the title's telemetry thread runs them at its next copy, within 100 ms, and writes the answer back. Version 2 of the block adds that ring, a ring of 1024 watched calls and a table of 512 driver phases. The stack sampler belongs to the agc driver, which registers it when its first queue worker starts; it suspends each thread of the process except its own in turn, walks the stack through `.pdata` and the DWARF records in `.ehfram` as the [worker sampler](#worker-sampler) does, and writes `<temp>/anyps5-telemetry/<pid>-stacks-<n>.txt` in the collapsed format, each stack prefixed with `thread-<id>`. The driver phases are the totals the trace threads keep, so they are published only with `APS5_TRACE_SUMMARY_EVERY` or a trace window set; `PerformanceTrace::Present` copies them at most every 100 ms. Function names come from the COFF symbols and the exports of the PE files the process loaded, so the system libraries are named and a converted executable without symbols is not.
 
 Without a connected process every tool except `list_processes` connects as `connect` does, or reports that no process or several publish. Each result is a text block holding the JSON and the same object as `structuredContent`. Invalid arguments are JSON-RPC errors (-32602) and failures of a valid call are tool results with `isError`. `anyps5_monitor_mcp` checks the parser, every tool and a run of the executable.
 

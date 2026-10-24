@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <deque>
 #include <filesystem>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -70,6 +71,31 @@ struct Verdict {
     std::string detail;
 };
 
+struct WatchedCallView {
+    std::uint64_t index = 0;
+    std::string import;
+    std::uint64_t thread = 0;
+    std::uint64_t arguments[Telemetry::WatchedArguments]{};
+    std::uint64_t result = 0;
+    double milliseconds = 0;
+    std::uint64_t returnAddress = 0;
+};
+
+struct PhaseRate {
+    std::string thread;
+    std::string name;
+    double msPerSecond = 0;
+    double totalMs = 0;
+    std::uint64_t count = 0;
+    double averageUs = 0;
+};
+
+struct CommandResult {
+    bool done = false;
+    std::uint64_t value = 0;
+    std::string message;
+};
+
 class Session {
 public:
     using Clock = std::chrono::steady_clock;
@@ -97,12 +123,19 @@ public:
     FrameSummary Summarize(double seconds) const;
     Verdict Judge() const;
     double WindowSeconds() const;
+    bool Writable() const;
+    std::uint64_t Send(Telemetry::CommandKind kind, std::uint64_t first, std::uint64_t second = 0, std::uint64_t third = 0);
+    std::optional<CommandResult> Result(std::uint64_t index) const;
+    std::optional<std::size_t> FindImport(const std::string& name) const;
+    const std::deque<WatchedCallView>& WatchedCalls() const;
+    const std::vector<PhaseRate>& Phases() const;
 
 private:
     struct Snapshot {
         Clock::time_point at;
         std::vector<Telemetry::Import> imports;
         std::vector<Telemetry::Thread> threads;
+        std::vector<Telemetry::Phase> phases;
     };
 
     void computeRates();
@@ -126,6 +159,9 @@ private:
     std::deque<SlowCallView> _slow;
     std::uint64_t _lastSlow = 0;
     std::vector<Telemetry::RecentCall> _recent;
+    std::deque<WatchedCallView> _watched;
+    std::uint64_t _lastWatched = 0;
+    std::vector<PhaseRate> _phases;
     std::vector<std::string> _importNames;
     std::unordered_map<std::string, std::string> _names;
     double _windowSeconds = 1.0;

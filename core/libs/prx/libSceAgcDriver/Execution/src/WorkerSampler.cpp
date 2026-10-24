@@ -1,5 +1,9 @@
 #include "prx/libSceAgcDriver/Execution/include/WorkerSampler.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Mutex.hpp"
+#ifdef APS5_ENABLE_PROFILER
+#include "prx/libc/include/Telemetry.hpp"
+#include <filesystem>
+#endif
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -314,9 +318,107 @@ void StartCallingThreadSampler(const char* path, std::jthread& slot) {
     });
 }
 
+#ifdef APS5_ENABLE_PROFILER
+struct ThreadBasicInformation {
+    LONG exitStatus;
+    PVOID teb;
+    PVOID clientProcess;
+    PVOID clientThread;
+    KAFFINITY affinity;
+    LONG priority;
+    LONG basePriority;
+};
+
+using QueryThread = LONG(NTAPI*)(HANDLE, int, PVOID, ULONG, PULONG);
+
+bool StackBounds(HANDLE thread, std::uint64_t& low, std::uint64_t& high) {
+    static const auto query = reinterpret_cast<QueryThread>(reinterpret_cast<void*>(GetProcAddress(GetModuleHandleA("ntdll.dll"), "NtQueryInformationThread")));
+    ThreadBasicInformation information{};
+    if (query == nullptr || query(thread, 0, &information, sizeof(information), nullptr) < 0 || information.teb == nullptr) return false;
+    const auto* block = static_cast<const NT_TIB*>(information.teb);
+    MEMORY_BASIC_INFORMATION stack{};
+    if (VirtualQuery(block->StackLimit, &stack, sizeof(stack)) == 0) return false;
+    low = reinterpret_cast<std::uint64_t>(stack.AllocationBase);
+    high = reinterpret_cast<std::uint64_t>(block->StackBase);
+    return true;
+}
+
+bool SampleProcessStacks(std::uint64_t milliseconds, std::uint64_t intervalMicroseconds, std::uint64_t depth, char* message, std::size_t capacity) {
+    static std::atomic<std::uint64_t> captures{0};
+    const DWORD self = GetCurrentThreadId();
+    const DWORD process = GetCurrentProcessId();
+    std::map<DWORD, std::unique_ptr<Sampler>> threads;
+    const HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+    if (snapshot == INVALID_HANDLE_VALUE) {
+        std::snprintf(message, capacity, "CreateToolhelp32Snapshot failed with %lu", GetLastError());
+        return false;
+    }
+    THREADENTRY32 entry{};
+    entry.dwSize = sizeof(entry);
+    for (BOOL more = Thread32First(snapshot, &entry); more; more = Thread32Next(snapshot, &entry)) {
+        if (entry.th32OwnerProcessID != process || entry.th32ThreadID == self) continue;
+        auto sampler = std::make_unique<Sampler>();
+        sampler->target = OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT | THREAD_QUERY_INFORMATION, FALSE, entry.th32ThreadID);
+        if (sampler->target == nullptr) continue;
+        sampler->depth = static_cast<int>(std::min<std::uint64_t>(depth, Sampler::WorkerDepth));
+        sampler->keepStacks = true;
+        StackBounds(sampler->target, sampler->stackLow, sampler->stackHigh);
+        threads.emplace(entry.th32ThreadID, std::move(sampler));
+    }
+    CloseHandle(snapshot);
+    const auto end = std::chrono::steady_clock::now() + std::chrono::milliseconds(milliseconds);
+    std::uint64_t rounds = 0;
+    while (std::chrono::steady_clock::now() < end) {
+        for (auto& [id, thread] : threads) thread->sample();
+        ++rounds;
+        std::this_thread::sleep_for(std::chrono::microseconds(intervalMicroseconds));
+    }
+    const auto directory = std::filesystem::temp_directory_path() / "anyps5-telemetry";
+    std::filesystem::create_directories(directory);
+    const auto path = directory / (std::to_string(process) + "-stacks-" + std::to_string(captures.fetch_add(1) + 1) + ".txt");
+    std::FILE* file = _wfopen(path.c_str(), L"wb");
+    if (file == nullptr) {
+        std::snprintf(message, capacity, "cannot write %s", path.string().c_str());
+        return false;
+    }
+    std::fprintf(file, "# rounds=%llu threads=%zu interval_us=%llu depth=%llu duration_ms=%llu\n", static_cast<unsigned long long>(rounds), threads.size(), static_cast<unsigned long long>(intervalMicroseconds),
+        static_cast<unsigned long long>(depth), static_cast<unsigned long long>(milliseconds));
+    std::map<std::uint64_t, std::string> loaded;
+    std::string text;
+    for (auto& [id, thread] : threads) {
+        std::lock_guard lock(thread->mutex);
+        if (thread->samples == 0) continue;
+        std::map<std::uint64_t, std::string> names;
+        for (const auto& [address, count] : thread->counts) names.emplace(address, Sampler::frameName(address, loaded));
+        const std::string prefix = "thread-" + std::to_string(id) + ";";
+        const std::string stacks = thread->stacks.Format([&](std::uint64_t address) { return names.at(address); });
+        for (std::size_t start = 0; start < stacks.size();) {
+            const std::size_t newline = stacks.find('\n', start);
+            text += prefix + stacks.substr(start, newline - start + 1);
+            start = newline + 1;
+        }
+    }
+    for (const auto& [base, name] : loaded) {
+        const auto* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(base);
+        const auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS*>(base + dos->e_lfanew);
+        std::fprintf(file, "# module %s 0x%llx 0x%lx\n", name.c_str(), static_cast<unsigned long long>(base), static_cast<unsigned long>(nt->OptionalHeader.SizeOfImage));
+    }
+    const bool written = std::fwrite(text.data(), 1, text.size(), file) == text.size();
+    if (std::fclose(file) != 0 || !written) {
+        std::snprintf(message, capacity, "cannot write %s", path.string().c_str());
+        return false;
+    }
+    std::snprintf(message, capacity, "%s", path.string().c_str());
+    return true;
+}
+#endif
+
 }
 
 void StartWorkerSampler() {
+#ifdef APS5_ENABLE_PROFILER
+    TelemetryRegisterStackSampler_nid_no_patch(&SampleProcessStacks);
+#endif
     StartProcessSampler();
     StartCallingThreadSampler(std::getenv("APS5_SAMPLE_WORKER"), workerSamplerThread);
 }

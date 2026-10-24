@@ -37,6 +37,9 @@ constexpr std::uint64_t DefaultSlowMicroseconds = 1000;
 std::once_flag g_once;
 Telemetry::Block* g_block = nullptr;
 std::filesystem::path g_discovery;
+std::atomic<Telemetry::StackSampler> g_sampler{nullptr};
+std::atomic<bool> g_sampling{false};
+std::mutex g_phaseMutex;
 
 std::uint64_t ProcessId() {
 #ifdef _WIN32
@@ -113,12 +116,86 @@ void AppendEntry(TEntry (&ring)[Capacity], std::uint64_t& written, TFill fill) {
     Telemetry::Store(entry.sequence, index * 2);
 }
 
+template <typename TEntry, std::size_t Capacity, typename TFill>
+void WriteSlot(TEntry (&ring)[Capacity], std::uint64_t index, TFill fill) {
+    TEntry& entry = ring[index % Capacity];
+    Telemetry::Store(entry.sequence, index * 2 - 1);
+    std::atomic_thread_fence(std::memory_order_release);
+    fill(entry);
+    Telemetry::Store(entry.sequence, index * 2);
+}
+
+void Respond(std::uint64_t index, Telemetry::CommandStatus status, std::uint64_t value, const std::string& message) {
+    WriteSlot(g_block->responses, index, [&](Telemetry::Response& response) {
+        response.status = static_cast<std::uint64_t>(status);
+        response.value = value;
+        CopyName(response.message, sizeof(response.message), message.c_str());
+    });
+}
+
+void Execute(std::uint64_t index, const Telemetry::Command& command) {
+    switch (static_cast<Telemetry::CommandKind>(command.kind)) {
+        case Telemetry::CommandKind::WatchImport: {
+            char message[Telemetry::MessageBytes] = "";
+            const bool watched = CallProfileWatch_nid_no_patch(command.arguments[0], command.arguments[1], message, sizeof(message));
+            Respond(index, watched ? Telemetry::CommandStatus::Done : Telemetry::CommandStatus::Failed, command.arguments[1], message);
+            return;
+        }
+        case Telemetry::CommandKind::SetSlowThreshold: {
+            const std::uint64_t ticks = CallProfileSetSlowMicroseconds_nid_no_patch(command.arguments[0]);
+            if (ticks == 0) {
+                Respond(index, Telemetry::CommandStatus::Failed, 0, "slow calls need APS5_PROFILE_CALLS and a threshold from 1 to 60000000 microseconds");
+                return;
+            }
+            Telemetry::Store(g_block->header.slowTicks, ticks);
+            Respond(index, Telemetry::CommandStatus::Done, ticks, "");
+            return;
+        }
+        case Telemetry::CommandKind::SampleStacks: {
+            const Telemetry::StackSampler sampler = g_sampler.load(std::memory_order_acquire);
+            if (sampler == nullptr) {
+                Respond(index, Telemetry::CommandStatus::Failed, 0, "no stack sampler: it is provided by the agc driver on Windows once the title presents");
+                return;
+            }
+            if (command.arguments[0] == 0 || command.arguments[0] > 30000 || command.arguments[1] < 100 || command.arguments[1] > 100000 || command.arguments[2] == 0 || command.arguments[2] > 64) {
+                Respond(index, Telemetry::CommandStatus::Failed, 0, "sampling takes 1 to 30000 ms, an interval of 100 to 100000 us and a depth of 1 to 64");
+                return;
+            }
+            if (g_sampling.exchange(true, std::memory_order_acq_rel)) {
+                Respond(index, Telemetry::CommandStatus::Failed, 0, "a stack sample is already running");
+                return;
+            }
+            std::thread([index, command, sampler] {
+                char message[Telemetry::MessageBytes] = "";
+                const bool sampled = sampler(command.arguments[0], command.arguments[1], command.arguments[2], message, sizeof(message));
+                g_sampling.store(false, std::memory_order_release);
+                Respond(index, sampled ? Telemetry::CommandStatus::Done : Telemetry::CommandStatus::Failed, 0, message);
+            }).detach();
+            return;
+        }
+    }
+    Respond(index, Telemetry::CommandStatus::Failed, 0, "unknown command " + std::to_string(command.kind));
+}
+
+void ProcessCommands(std::uint64_t& processed) {
+    const std::uint64_t written = Telemetry::Load(g_block->header.commandsWritten);
+    while (processed < written) {
+        const std::uint64_t index = processed + 1;
+        Telemetry::Command command{};
+        if (!Telemetry::ReadEntry(g_block->commands[index % Telemetry::CommandCapacity], command, index * 2)) return;
+        processed = index;
+        Execute(index, command);
+    }
+}
+
 void PublishLoop() {
     Telemetry::Header& header = g_block->header;
     std::vector<CallProfileThread> threads(Telemetry::ThreadCapacity);
     std::vector<CallTraceEntry> recent(Telemetry::RecentCapacity);
     std::uint64_t lastRecent = 0;
+    std::uint64_t processed = Telemetry::Load(header.commandsWritten);
     for (;;) {
+        ProcessCommands(processed);
         const double nanosecondsPerTick = CallProfileNanosecondsPerTick_nid_no_patch();
         Telemetry::Store(header.ticksPerSecond, nanosecondsPerTick > 0 ? static_cast<std::uint64_t>(1e9 / nanosecondsPerTick) : 0);
         Telemetry::Store(header.overheadTicks, CallProfileOverheadTicks_nid_no_patch());
@@ -210,6 +287,39 @@ std::uint64_t CallTelemetrySlowTicks_nid_no_patch(double nanosecondsPerTick) {
     const auto ticks = std::max<std::uint64_t>(1, static_cast<std::uint64_t>(static_cast<double>(microseconds) * 1e3 / nanosecondsPerTick));
     Telemetry::Store(g_block->header.slowTicks, ticks);
     return ticks;
+}
+
+void TelemetryRegisterStackSampler_nid_no_patch(Telemetry::StackSampler sampler) {
+    g_sampler.store(sampler, std::memory_order_release);
+}
+
+void TelemetryPublishPhases_nid_no_patch(const Telemetry::PhaseTotal* totals, std::size_t count) {
+    if (totals == nullptr || !TelemetryEnabled_nid_no_patch()) return;
+    std::scoped_lock lock(g_phaseMutex);
+    const std::size_t published = std::min(count, Telemetry::PhaseCapacity);
+    for (std::size_t index = 0; index < published; ++index) {
+        PublishEntry(g_block->phases[index], [&total = totals[index]](Telemetry::Phase& target) {
+            target.nanoseconds = total.nanoseconds;
+            target.count = total.count;
+            CopyName(target.thread, sizeof(target.thread), total.thread);
+            const std::string name = std::string(total.scope != nullptr ? total.scope : "") + (total.stage != nullptr && *total.stage != '\0' ? std::string(".") + total.stage : std::string());
+            CopyName(target.name, sizeof(target.name), name.c_str());
+        });
+    }
+    Telemetry::Store(g_block->header.phases, published);
+    Telemetry::Store(g_block->header.phasesPublishes, Telemetry::Load(g_block->header.phasesPublishes) + 1);
+}
+
+void CallTelemetryNoteWatched_nid_no_patch(std::size_t import, std::uint64_t thread, const std::uint64_t* arguments, std::uint64_t result, std::uint64_t ticks, std::uint64_t returnAddress) {
+    if (g_block == nullptr) return;
+    AppendEntry(g_block->watched, g_block->header.watchedWritten, [&](Telemetry::WatchedCall& target) {
+        target.import = import;
+        target.thread = thread;
+        std::copy(arguments, arguments + Telemetry::WatchedArguments, target.arguments);
+        target.result = result;
+        target.ticks = ticks;
+        target.returnAddress = returnAddress;
+    });
 }
 
 void CallTelemetryNoteSlow_nid_no_patch(std::size_t import, std::uint64_t ticks, std::uint64_t endTicks, std::uint64_t thread, std::uint64_t returnAddress) {

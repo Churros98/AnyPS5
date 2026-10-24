@@ -2,7 +2,9 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdlib>
+#include <cstring>
 #include <filesystem>
+#include <iterator>
 #include <fstream>
 #include <sstream>
 #include <stdexcept>
@@ -84,7 +86,9 @@ void Session::Disconnect() {
     _slow.clear();
     _recent.clear();
     _importNames.clear();
-    _lastFrame = _lastPresent = _lastGpu = _lastDriver = _lastDraws = _lastDispatches = _lastSlow = 0;
+    _watched.clear();
+    _phases.clear();
+    _lastFrame = _lastPresent = _lastGpu = _lastDriver = _lastDraws = _lastDispatches = _lastSlow = _lastWatched = 0;
 }
 
 bool Session::Connected() const {
@@ -155,7 +159,7 @@ void Session::Poll() {
     if (_header.publishes != _lastPublishes || _history.empty()) {
         if (_header.publishes != _lastPublishes) _lastChange = now;
         _lastPublishes = _header.publishes;
-        _history.push_back({now, _reader.ReadImports(), _reader.ReadThreads()});
+        _history.push_back({now, _reader.ReadImports(), _reader.ReadThreads(), _reader.ReadPhases()});
         const auto horizon = now - std::chrono::duration_cast<Clock::duration>(std::chrono::duration<double>(30.0 + 1.0));
         while (_history.size() > 2 && _history[1].at < horizon) _history.pop_front();
         _importNames.resize(_history.back().imports.size());
@@ -185,6 +189,19 @@ void Session::Poll() {
         _lastDraws = frame.draws;
         _lastDispatches = frame.dispatches;
     }
+    for (const Telemetry::WatchedCall& call : _reader.ReadWatchedCalls(_lastWatched)) {
+        _lastWatched = call.sequence / 2;
+        WatchedCallView view;
+        view.index = _lastWatched;
+        view.import = call.import < _importNames.size() ? _importNames[call.import] : "#" + std::to_string(call.import);
+        view.thread = call.thread;
+        std::copy(std::begin(call.arguments), std::end(call.arguments), view.arguments);
+        view.result = call.result;
+        view.milliseconds = milliseconds(call.ticks);
+        view.returnAddress = call.returnAddress;
+        _watched.push_back(view);
+        if (_watched.size() > Telemetry::WatchedCapacity) _watched.pop_front();
+    }
     for (const Telemetry::SlowCall& call : _reader.ReadSlowCalls(_lastSlow)) {
         _lastSlow = call.sequence / 2;
         SlowCallView view;
@@ -202,6 +219,7 @@ void Session::Poll() {
 void Session::computeRates() {
     _imports.clear();
     _threads.clear();
+    _phases.clear();
     if (_history.empty()) return;
     const Snapshot& newest = _history.back();
     const Snapshot* oldest = &_history.front();
@@ -237,6 +255,24 @@ void Session::computeRates() {
         rate.maxUs = milliseconds(current.maxTicks) * 1e3;
         rate.totalExclusiveMs = milliseconds(current.exclusiveTicks);
         _imports.push_back(rate);
+    }
+    for (const Telemetry::Phase& current : newest.phases) {
+        Telemetry::Phase previous{};
+        if (oldest != &newest) {
+            const auto found = std::find_if(oldest->phases.begin(), oldest->phases.end(), [&current](const Telemetry::Phase& phase) {
+                return std::strcmp(phase.thread, current.thread) == 0 && std::strcmp(phase.name, current.name) == 0;
+            });
+            if (found != oldest->phases.end()) previous = *found;
+        }
+        PhaseRate rate;
+        rate.thread = current.thread;
+        rate.name = current.name;
+        rate.totalMs = static_cast<double>(current.nanoseconds) / 1e6;
+        rate.count = current.count;
+        rate.msPerSecond = static_cast<double>(current.nanoseconds - std::min(previous.nanoseconds, current.nanoseconds)) / 1e6 * perSecond;
+        const std::uint64_t calls = current.count - std::min(previous.count, current.count);
+        rate.averageUs = calls == 0 ? 0 : static_cast<double>(current.nanoseconds - std::min(previous.nanoseconds, current.nanoseconds)) / 1e3 / static_cast<double>(calls);
+        _phases.push_back(rate);
     }
     for (const Telemetry::Thread& current : newest.threads) {
         Telemetry::Thread previous{};
@@ -274,6 +310,37 @@ const std::deque<SlowCallView>& Session::SlowCalls() const {
 
 const std::vector<Telemetry::RecentCall>& Session::RecentCalls() const {
     return _recent;
+}
+
+bool Session::Writable() const {
+    return _reader.Writable();
+}
+
+std::uint64_t Session::Send(Telemetry::CommandKind kind, std::uint64_t first, std::uint64_t second, std::uint64_t third) {
+    return Connected() ? _reader.SendCommand(kind, first, second, third) : 0;
+}
+
+std::optional<CommandResult> Session::Result(std::uint64_t index) const {
+    Telemetry::Response response{};
+    if (!Connected() || index == 0 || !_reader.ReadResponse(index, response)) return std::nullopt;
+    return CommandResult{response.status == static_cast<std::uint64_t>(Telemetry::CommandStatus::Done), response.value, response.message};
+}
+
+std::optional<std::size_t> Session::FindImport(const std::string& name) const {
+    if (_history.empty()) return std::nullopt;
+    const auto& imports = _history.back().imports;
+    for (std::size_t index = 0; index < imports.size(); ++index) {
+        if (imports[index].sequence != 0 && (name == imports[index].name || name == DisplayName(imports[index].name))) return index;
+    }
+    return std::nullopt;
+}
+
+const std::deque<WatchedCallView>& Session::WatchedCalls() const {
+    return _watched;
+}
+
+const std::vector<PhaseRate>& Session::Phases() const {
+    return _phases;
 }
 
 FrameSummary Session::Summarize(double seconds) const {

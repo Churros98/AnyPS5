@@ -9,6 +9,8 @@
 #include <algorithm>
 #include <atomic>
 #include <bit>
+#include <memory>
+#include <string>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -81,6 +83,8 @@ struct Frame {
     std::uint64_t callerStack;
     std::uint64_t start;
     std::uint64_t children;
+    bool watched;
+    std::uint64_t arguments[Telemetry::WatchedArguments];
 };
 
 struct ThreadState {
@@ -94,7 +98,10 @@ using ThreadSlot = HostThreadSlot<ThreadState*, ThreadStateTag>;
 
 std::atomic<ThreadStats*> g_threads{nullptr};
 std::uint64_t g_overhead = 0;
-std::uint64_t g_slowTicks = 0;
+std::atomic<std::uint64_t> g_slowTicks{0};
+std::unique_ptr<std::atomic<std::uint32_t>[]> g_watches;
+std::atomic<std::uint64_t> g_watching{0};
+constexpr std::uint64_t MaximumWatchedCalls = 1024;
 std::uint64_t g_startTicks = 0;
 std::chrono::steady_clock::time_point g_startTime;
 CallTraceImportRecord g_calibration;
@@ -243,6 +250,20 @@ void APS5_VABI CallProfileEnterRecord_nid_no_patch(const void* record, std::uint
     frame.returnAddress = *returnSlot;
     frame.callerStack = callerStack;
     frame.children = 0;
+    frame.watched = false;
+    if (g_watching.load(std::memory_order_relaxed) != 0 && entry != &g_calibration) {
+        std::size_t count = 0;
+        const auto index = static_cast<std::size_t>(entry - CallTraceRecords_nid_no_patch(&count));
+        std::atomic<std::uint32_t>& remaining = g_watches[index];
+        std::uint32_t left = remaining.load(std::memory_order_relaxed);
+        while (left != 0 && !remaining.compare_exchange_weak(left, left - 1, std::memory_order_relaxed)) {
+        }
+        if (left != 0) {
+            g_watching.fetch_sub(1, std::memory_order_relaxed);
+            frame.watched = true;
+            for (std::size_t argument = 0; argument < Telemetry::WatchedArguments; ++argument) frame.arguments[argument] = returnSlot[-1 - static_cast<std::ptrdiff_t>(argument)];
+        }
+    }
     *returnSlot = reinterpret_cast<std::uint64_t>(&CallProfileExit_nid_no_patch);
     frame.start = __rdtsc();
 }
@@ -273,7 +294,9 @@ std::uint64_t APS5_VABI CallProfileLeave_nid_no_patch(std::uint64_t stack) {
     Add(stat.exclusive, exclusive);
     if (inclusive > stat.maximum.load(std::memory_order_relaxed)) stat.maximum.store(inclusive, std::memory_order_relaxed);
     Add(stat.histogram[Bucket(inclusive)], 1);
-    if (g_slowTicks != 0 && inclusive >= g_slowTicks) CallTelemetryNoteSlow_nid_no_patch(index, inclusive, now, state->stats.thread, frame.returnAddress);
+    const std::uint64_t slow = g_slowTicks.load(std::memory_order_relaxed);
+    if (slow != 0 && inclusive >= slow) CallTelemetryNoteSlow_nid_no_patch(index, inclusive, now, state->stats.thread, frame.returnAddress);
+    if (frame.watched) CallTelemetryNoteWatched_nid_no_patch(index, state->stats.thread, frame.arguments, *reinterpret_cast<const std::uint64_t*>(stack - 2 * sizeof(std::uint64_t)), inclusive, frame.returnAddress);
     return frame.returnAddress;
 }
 
@@ -289,9 +312,48 @@ bool CallProfileStart_nid_no_patch() {
     Calibrate();
     const auto calibrated = std::chrono::steady_clock::now() - g_startTime;
     if (calibrated < MinimumCalibration) std::this_thread::sleep_for(MinimumCalibration - calibrated);
-    if (TelemetryEnabled_nid_no_patch()) g_slowTicks = CallTelemetrySlowTicks_nid_no_patch(CallProfileNanosecondsPerTick_nid_no_patch());
+    g_watches = std::make_unique<std::atomic<std::uint32_t>[]>(MaxPages * PageRecords);
+    if (TelemetryEnabled_nid_no_patch()) g_slowTicks.store(CallTelemetrySlowTicks_nid_no_patch(CallProfileNanosecondsPerTick_nid_no_patch()), std::memory_order_relaxed);
     if (interval) std::thread(Report, *interval).detach();
     return true;
+}
+
+bool CallProfileWatch_nid_no_patch(std::uint64_t import, std::uint64_t count, char* message, std::size_t capacity) {
+    const auto reply = [message, capacity](const std::string& text) {
+        std::snprintf(message, capacity, "%s", text.c_str());
+    };
+    if (!g_watches) {
+        reply("imports are not timed, and so not watched, with APS5_PROFILE_CALLS=0");
+        return false;
+    }
+    std::size_t records = 0;
+    const CallTraceImportRecord* table = CallTraceRecords_nid_no_patch(&records);
+    if (import >= records) {
+        reply("no traced import " + std::to_string(import));
+        return false;
+    }
+    const CallTraceImportRecord& record = table[import];
+    if (!CallProfileTimes_nid_no_patch(record.name.c_str(), record.library.c_str())) {
+        reply(record.name + " is counted but not timed, so its calls cannot be watched");
+        return false;
+    }
+    if (count > MaximumWatchedCalls) {
+        reply("at most " + std::to_string(MaximumWatchedCalls) + " calls can be watched at once");
+        return false;
+    }
+    const std::uint32_t before = g_watches[import].exchange(static_cast<std::uint32_t>(count), std::memory_order_relaxed);
+    if (count >= before) g_watching.fetch_add(count - before, std::memory_order_relaxed);
+    else g_watching.fetch_sub(before - count, std::memory_order_relaxed);
+    reply(count == 0 ? "stopped watching " + record.name : "watching the next " + std::to_string(count) + " calls of " + record.name);
+    return true;
+}
+
+std::uint64_t CallProfileSetSlowMicroseconds_nid_no_patch(std::uint64_t microseconds) {
+    const double nanosecondsPerTick = CallProfileNanosecondsPerTick_nid_no_patch();
+    if (g_startTicks == 0 || nanosecondsPerTick <= 0 || microseconds == 0 || microseconds > 60000000) return 0;
+    const auto ticks = std::max<std::uint64_t>(1, static_cast<std::uint64_t>(static_cast<double>(microseconds) * 1e3 / nanosecondsPerTick));
+    g_slowTicks.store(ticks, std::memory_order_relaxed);
+    return ticks;
 }
 
 bool CallProfileTimes_nid_no_patch(const char* name, const char* library) {

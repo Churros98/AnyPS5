@@ -4,6 +4,9 @@
 #include "prx/libSceAgcDriver/Execution/include/VulkanDevice.hpp"
 #include "prx/libSceAgcDriver/TraceRevision.hpp"
 #include "prx/libkernel/AppMetadata/include/AppMetadata.hpp"
+#ifdef APS5_ENABLE_PROFILER
+#include "prx/libc/include/Telemetry.hpp"
+#endif
 #include <array>
 #include <cstdlib>
 #include <cstring>
@@ -211,6 +214,24 @@ double seconds(Clock::duration elapsed) {
     return std::chrono::duration<double>(elapsed).count();
 }
 
+#ifdef APS5_ENABLE_PROFILER
+void PublishPhases(const std::vector<std::unique_ptr<TraceThread>>& threads, Clock::time_point now) {
+    static Clock::time_point published{};
+    if (now - published < std::chrono::milliseconds(100) || !TelemetryEnabled_nid_no_patch()) return;
+    published = now;
+    std::vector<TraceThread::Snapshot> snapshots;
+    snapshots.reserve(threads.size());
+    std::vector<Telemetry::PhaseTotal> totals;
+    for (const auto& thread : threads) {
+        snapshots.push_back(thread->Collect());
+        for (const auto& total : snapshots.back().totals) {
+            totals.push_back({snapshots.back().name.c_str(), total.scope, total.stage, static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(total.length).count()), total.count});
+        }
+    }
+    TelemetryPublishPhases_nid_no_patch(totals.data(), totals.size());
+}
+#endif
+
 }
 
 void PerformanceTrace::BindThread(const char* name, std::size_t capacity) {
@@ -294,6 +315,9 @@ void PerformanceTrace::Present(std::uint32_t width, std::uint32_t height, const 
         state.first = now;
         state.started = true;
     }
+#ifdef APS5_ENABLE_PROFILER
+    PublishPhases(state.threads, now);
+#endif
     const auto present = state.present++;
     const auto edge = state.window ? state.window->Present(present, now - state.first) : TraceWindow::Edge::None;
     if (state.interval) {
