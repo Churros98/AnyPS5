@@ -33,10 +33,19 @@ std::atomic<CallTraceImportRecord*> g_records{nullptr};
 std::atomic<std::size_t> g_recordCount{0};
 std::uint8_t* g_writable = nullptr;
 std::uint8_t* g_executable = nullptr;
+#ifdef APS5_ENABLE_PROFILER
+bool g_profiling = false;
+#endif
 
 bool Selected(std::string_view library) {
     const char* value = std::getenv("APS5_TRACE_CALLS");
-    if (value == nullptr || *value == '\0') return false;
+    if (value == nullptr || *value == '\0') {
+#ifdef APS5_ENABLE_PROFILER
+        return CallProfileRequested_nid_no_patch();
+#else
+        return false;
+#endif
+    }
     std::string_view rest(value);
     if (library.ends_with(".prx")) library.remove_suffix(4);
     while (!rest.empty()) {
@@ -80,7 +89,10 @@ void MapThunkArea() {
 }
 #endif
 
-std::uint64_t EntryHandler() {
+std::uint64_t EntryHandler([[maybe_unused]] const CallTraceImportRecord& record) {
+#ifdef APS5_ENABLE_PROFILER
+    if (g_profiling && CallProfileTimes_nid_no_patch(record.name.c_str(), record.library.c_str())) return reinterpret_cast<std::uint64_t>(&CallProfileEnter_nid_no_patch);
+#endif
     return reinterpret_cast<std::uint64_t>(&CallTraceEnter_nid_no_patch);
 }
 
@@ -89,7 +101,7 @@ void* WriteThunk(const CallTraceImportRecord& record, const std::size_t index) {
     const std::uint8_t prefix[] = {0x49, 0xbb};
     const std::uint8_t jump[] = {0xff, 0x25, 0, 0, 0, 0};
     const auto recordAddress = reinterpret_cast<std::uint64_t>(&record);
-    const auto handler = EntryHandler();
+    const auto handler = EntryHandler(record);
     std::uint8_t* thunk = g_writable + offset;
     std::memcpy(thunk, prefix, sizeof(prefix));
     std::memcpy(thunk + 2, &recordAddress, sizeof(recordAddress));
@@ -118,6 +130,9 @@ void* TraceImport_nid_no_patch(void* target, const char* name, const char* libra
         g_records.store(new CallTraceImportRecord[RecordCapacity], std::memory_order_release);
 #ifdef __linux__
         CallTraceInstallAbortReport_nid_no_patch();
+#endif
+#ifdef APS5_ENABLE_PROFILER
+        g_profiling = CallProfileStart_nid_no_patch();
 #endif
     }
 #ifdef __linux__

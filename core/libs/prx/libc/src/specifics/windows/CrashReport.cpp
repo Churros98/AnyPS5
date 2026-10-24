@@ -41,6 +41,12 @@ void ReportStackCandidates(std::uint64_t rsp, int limit, std::uint64_t span);
 void ReportCallTrace();
 
 void DescribeAddress(std::uint64_t address, char* buffer, std::size_t size) {
+#ifdef APS5_ENABLE_PROFILER
+    if (address == reinterpret_cast<std::uint64_t>(&CallProfileExit_nid_no_patch)) {
+        std::snprintf(buffer, size, "0x%016llx [call profiler]", static_cast<unsigned long long>(address));
+        return;
+    }
+#endif
     HMODULE module = nullptr;
     char path[MAX_PATH] = "?";
     if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, reinterpret_cast<LPCSTR>(address), &module) && module) {

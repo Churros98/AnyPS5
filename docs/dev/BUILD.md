@@ -116,6 +116,7 @@ Project switches accept `ON` or `OFF`:
 | `-DANYPS5_USE_SYSTEM_DEPS=ON`    | `OFF`   | Resolve SDL2, freetype, Vulkan-Headers, SPIRV-Headers, glslang and SPIRV-Tools from the system instead of the submodules. |
 | `-DAPS5_ENABLE_TIMING_LOG=ON`    | `OFF`   | Compile frame timing logging.                    |
 | `-DAPS5_ENABLE_TRACY=ON`         | `OFF`   | Build the [Tracy](#tracy) profiler client into the agc driver. |
+| `-DAPS5_ENABLE_PROFILER=ON`      | `OFF`   | Build the [import call profiler](#import-call-profiler) into libc. |
 | `-DAPS5_AGC_CREATE_LOG=OFF`      | `ON`    | Disable successful `sceAgcCreateShader` logging. |
 | `-DAGC_BUILD_VISUAL_TEST=ON`     | `OFF`   | Build the standalone AGC SPIR-V visual test.     |
 
@@ -161,6 +162,16 @@ With `CMAKE_OSX_ARCHITECTURES=x86_64` Apple silicon runs the tests through Roset
 `-DAPS5_ENABLE_TRACY=ON` builds the [Tracy](https://github.com/wolfpld/tracy) 0.14.1 client from `3rdparty/tracy` as a shared library next to the patched `.prx` files (`libTracyClient.dll`, `libTracyClient.so.0.14.1` on Linux); copy it with them. Every `PerformanceTimer` scope of libSceAgcDriver and libSceVideoOut is a zone, every presented flip ends a frame, and the queue workers and the presenter are named threads. Connect the Tracy 0.14.1 profiler to `127.0.0.1`: the client listens only on localhost and records only while a profiler is connected. Sampling, system tracing, call stacks, code transfer and Tracy's crash handler are disabled. Without the flag nothing of Tracy is built.
 
 On Windows MinGW frees `thread_local` objects before their destructors run, so the Tracy client is built without `thread_local` destructors and never destroys its event queue: a thread that emitted a zone and ended keeps its event blocks (2 MiB each) until the process exits.
+
+## Import call profiler
+
+`-DAPS5_ENABLE_PROFILER=ON` builds `CallProfiler.cpp` into libc. Without the flag nothing of it is built and call tracing behaves as described in [Usage](../user/USAGE.md#tracing-system-library-calls).
+
+With the flag, an executable converted with `--trace-imports` times every traced call; without `APS5_TRACE_CALLS` every import is traced. `APS5_PROFILE_CALLS=0` turns the profiler off, and call tracing then behaves as without the flag; `APS5_PROFILE_CALLS=<seconds>` (1 to 86400) also prints a `[calls]` report; any other value fails the first traced import. The thunk of each traced import replaces the caller's return address with a return trampoline and keeps the real one on a per-thread stack of 256 calls; a deeper call is counted but not timed. Times are read with `rdtsc` and converted with the rate measured against `steady_clock` since the first traced import. Before the first import is bound, 10,000 calls of an empty function measure the profiler's own cost, the median of which is subtracted from every call. Each import gets its timed calls, inclusive time, exclusive time (without the traced calls made from callbacks during the call), its longest call and a histogram of 32 power-of-two buckets; each thread keeps its own counters and readers add them up.
+
+With `APS5_PROFILE_CALLS=<seconds>`, every `<seconds>` seconds a thread prints a `[calls]` report to stderr: the calls and timed calls of the interval, the profiler cost per call, then the 20 imports with the most exclusive time in the interval, with their exclusive and inclusive milliseconds per second, calls per second, mean, p50 and p99 (bucket centres) and longest call since start, all in microseconds. Crash and abort reports end with the 16 imports with the most exclusive time since start.
+
+`setjmp`, `_setjmp`, `sigsetjmp`, `longjmp`, `_longjmp`, `siglongjmp`, `getcontext`, `swapcontext`, `vfork`, `__cxa_throw`, `__cxa_rethrow`, the `_Unwind_*` entry points, `sceLibcBacktraceSelf`, `scePthreadExit`, `pthread_exit` and every `libSceFiber` import are counted but not timed, by name or NID. The limits are listed in the [libc](debt/libc.md) technical debt.
 
 ## Compute pipeline replay
 

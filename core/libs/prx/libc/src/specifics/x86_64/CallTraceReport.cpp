@@ -1,6 +1,9 @@
 #if defined(_WIN32) || defined(__linux__)
 #include "prx/libc/include/CallTrace.hpp"
 #include "prx/libc/include/CallTraceInternal.hpp"
+#ifdef APS5_ENABLE_PROFILER
+#include "prx/libc/include/CallProfile.hpp"
+#endif
 #include <cstddef>
 #include <cstdint>
 #include <iterator>
@@ -91,6 +94,17 @@ extern "C" void CallTraceWriteReport_nid_no_patch(CallTraceReportWriter writer, 
     for (std::size_t index = 0; index < counted; ++index) {
         line.Text("    ").Decimal(counts[index].calls, 12).Text(" ").Text(counts[index].library).Text(" ").Text(counts[index].name).Write();
     }
+#ifdef APS5_ENABLE_PROFILER
+    static CallProfileEntry expensive[16];
+    const std::size_t profiled = CopyCallProfile_nid_no_patch(expensive, std::size(expensive));
+    if (profiled == 0) return;
+    const double microsecondsPerTick = CallProfileNanosecondsPerTick_nid_no_patch() / 1e3;
+    line.Text("  most expensive traced imports (exclusive us, timed calls):").Write();
+    for (std::size_t index = 0; index < profiled; ++index) {
+        const auto microseconds = static_cast<std::uint64_t>(static_cast<double>(expensive[index].exclusiveTicks) * microsecondsPerTick);
+        line.Text("    ").Decimal(microseconds, 12).Text(" ").Decimal(expensive[index].timedCalls, 12).Text(" ").Text(expensive[index].library).Text(" ").Text(expensive[index].name).Write();
+    }
+#endif
 }
 
 #endif

@@ -27,6 +27,13 @@ void CallTraceWriteReport_nid_no_patch(CallTraceReportWriter writer, CallTraceMo
 void CallTraceInstallAbortReport_nid_no_patch();
 void CallTraceSnapshotModules_nid_no_patch();
 #endif
+#ifdef APS5_ENABLE_PROFILER
+bool CallProfileRequested_nid_no_patch();
+bool CallProfileStart_nid_no_patch();
+bool CallProfileTimes_nid_no_patch(const char* name, const char* library);
+void CallProfileEnter_nid_no_patch();
+void CallProfileExit_nid_no_patch();
+#endif
 }
 
 #endif

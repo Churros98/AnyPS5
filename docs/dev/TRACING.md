@@ -12,6 +12,7 @@ Set a switch before starting the emulator. Unless noted, any value enables it. M
 | `APS5_TRACE_AUDIOOUT` | Audio output port parameters when a port is opened. |
 | `APS5_TRACE_AUDIOOUT2` | AudioOut2 context and port parameters, attributes, pushes, queue polls and periodic queue summaries. |
 | `APS5_TRACE_CALLS` | On Windows and Linux, records calls to the imports selected by this comma-separated library list (or `all`); crash and abort reports (abort only on Linux) include the last 64 calls and most-called imports. The executable must be converted with `--trace-imports`; see [Usage](../user/USAGE.md#tracing-system-library-calls). |
+| `APS5_PROFILE_CALLS=<seconds>` | With a build configured with `-DAPS5_ENABLE_PROFILER=ON`, which times the traced calls and traces every import while `APS5_TRACE_CALLS` is unset, prints a `[calls]` report every `<seconds>` seconds; `0` turns the profiler off; see [Build](BUILD.md#import-call-profiler). |
 | `APS5_TRACE_EXIT` | Guest `exit` and `_Exit` calls and process-exit backtraces. |
 | `APS5_TRACE_FIBER` | Fiber initialization, switches and returns. |
 | `APS5_TRACE_MEMORY` | Direct-memory allocation, mapping and protection operations. |

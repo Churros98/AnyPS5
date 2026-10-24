@@ -107,6 +107,11 @@ target_sources(libc PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/src/exception/Exports.cpp
 )
 
+if(APS5_ENABLE_PROFILER)
+    target_sources(libc PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/specifics/x86_64/CallProfiler.cpp)
+    target_compile_definitions(libc PRIVATE APS5_ENABLE_PROFILER=1)
+endif()
+
 set_source_files_properties(${CMAKE_CURRENT_SOURCE_DIR}/src/MathExact.cpp
         TARGET_DIRECTORY libc PROPERTIES COMPILE_OPTIONS "-frounding-math")
 
@@ -790,6 +795,24 @@ if(BUILD_TESTING)
         endif()
         set_tests_properties(guest_call_trace_abort PROPERTIES TIMEOUT 20 PASS_REGULAR_EXPRESSION
             "last traced system library calls[^~]*#1 thread [0-9]+ libTraced.prx Integers from [^~]*guest_call_trace_tests${CMAKE_EXECUTABLE_SUFFIX}[^~]*#2 thread [0-9]+ libOther.prx Blocks from[^~]*last traced calls of thread [0-9]+:[^~]*#1 libTraced.prx Integers from[^~]*#2 libOther.prx Blocks from[^~]*most called traced imports \\(2 calls in total\\):[^~]* 1 libTraced.prx Integers[^~]* 1 libOther.prx Blocks")
+        if(APS5_ENABLE_PROFILER)
+            add_test_executable(guest_call_profile_tests ${LIBS_INCLUDE_DIR}/tests/GuestCallProfile.cpp)
+            target_include_directories(guest_call_profile_tests PRIVATE ${LIBS_INCLUDE_DIR})
+            target_link_libraries(guest_call_profile_tests PRIVATE libc)
+            configure_windows_unwind(guest_call_profile_tests)
+            add_test(NAME guest_call_profile COMMAND guest_call_profile_tests)
+            add_test(NAME guest_call_profile_abort COMMAND guest_call_profile_tests abort)
+            add_test(NAME guest_call_profile_invalid COMMAND guest_call_profile_tests invalid)
+            add_test(NAME guest_call_profile_default COMMAND guest_call_profile_tests default)
+            add_test(NAME guest_call_profile_off COMMAND guest_call_profile_tests off)
+            if(WIN32)
+                set_tests_properties(guest_call_profile guest_call_profile_abort guest_call_profile_invalid guest_call_profile_default guest_call_profile_off PROPERTIES ENVIRONMENT_MODIFICATION
+                    "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
+            endif()
+            set_tests_properties(guest_call_profile guest_call_profile_invalid guest_call_profile_default guest_call_profile_off PROPERTIES TIMEOUT 20)
+            set_tests_properties(guest_call_profile_abort PROPERTIES TIMEOUT 20 PASS_REGULAR_EXPRESSION
+                "most expensive traced imports \\(exclusive us, timed calls\\):[^~]* 1 libTraced.prx Nap")
+        endif()
         if(NOT WIN32)
             add_test(NAME guest_call_trace_abort_race COMMAND guest_call_trace_tests abort-race)
             set_tests_properties(guest_call_trace_abort_race PROPERTIES TIMEOUT 20 PASS_REGULAR_EXPRESSION
