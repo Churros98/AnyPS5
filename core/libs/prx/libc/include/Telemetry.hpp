@@ -126,6 +126,7 @@ struct Phase {
     std::uint64_t sequence;
     std::uint64_t nanoseconds;
     std::uint64_t count;
+    std::uint64_t threadId;
     char thread[PhaseThreadBytes];
     char name[PhaseNameBytes];
 };
@@ -160,6 +161,7 @@ struct PhaseTotal {
     const char* stage;
     std::uint64_t nanoseconds;
     std::uint64_t count;
+    std::uint64_t threadId;
 };
 
 using StackSampler = bool (*)(std::uint64_t milliseconds, std::uint64_t intervalMicroseconds, std::uint64_t depth, char* message, std::size_t capacity);

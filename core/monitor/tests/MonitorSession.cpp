@@ -1,13 +1,17 @@
 #include "Session.hpp"
+#include "ThreadNames.hpp"
 #include "prx/libc/include/CallTrace.hpp"
 #include "prx/libc/include/Telemetry.hpp"
+#include "prx/libc/include/general/ThreadName.hpp"
 #include "prx/libc/include/general/VabiMacros.hpp"
 #ifdef _WIN32
 #include <windows.h>
 #else
+#include <pthread.h>
 #include <unistd.h>
 #endif
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
@@ -45,6 +49,22 @@ static std::uint64_t ProcessId() {
 #endif
 }
 
+static std::uint64_t ThreadId() {
+#ifdef _WIN32
+    return GetCurrentThreadId();
+#else
+    return static_cast<std::uint64_t>(gettid());
+#endif
+}
+
+static void NameThread(const char* name) {
+#ifdef _WIN32
+    Require(SUCCEEDED(ThreadName::SetCurrent(name)));
+#else
+    Require(pthread_setname_np(pthread_self(), name) == 0);
+#endif
+}
+
 static bool Contains(const std::string& text, const char* part) {
     return text.find(part) != std::string::npos;
 }
@@ -68,6 +88,25 @@ static void WaitForPublishes(Monitor::Session& session, std::uint64_t count) {
 }
 
 int main() {
+    NameThread("monitor session");
+    std::uint64_t workerId = 0;
+    std::atomic<bool> workerNamed{false};
+    std::atomic<bool> done{false};
+    std::thread worker([&] {
+        NameThread("named worker");
+        workerId = ThreadId();
+        workerNamed = true;
+        while (!done) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    });
+    while (!workerNamed) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    Require(Monitor::ThreadNames::Read(ProcessId(), workerId) == "named worker");
+    Monitor::ThreadNames threadNames;
+    Require(threadNames.Name(workerId).empty());
+    threadNames.Attach(ProcessId());
+    Require(threadNames.Name(workerId) == "named worker" && threadNames.Name(0).empty());
+    done = true;
+    worker.join();
+
     SetVariable("APS5_TRACE_CALLS", "libTraced");
     SetVariable("APS5_PROFILE_CALLS", "3600");
     SetVariable("APS5_MONITOR_SLOW_US", "5000");
@@ -131,8 +170,10 @@ int main() {
     Require(napped->callsPerSecond > 10 && napped->callsPerSecond < 70);
     Require(napped->exclusiveMsPerSecond > 500 && napped->averageUs >= 19000 && napped->p50Us > 0);
     Require(!session.Threads().empty() && session.Threads().front().importMsPerSecond > 500);
+    const auto self = std::find_if(session.Threads().begin(), session.Threads().end(), [](const Monitor::ThreadRate& rate) { return rate.thread == ThreadId(); });
+    Require(self != session.Threads().end() && self->name == "monitor session" && session.ThreadName(ThreadId()) == "monitor session");
     const Monitor::Verdict waiting = session.Judge();
-    Require(waiting.title == "Waiting in system calls" && Contains(waiting.detail, "Nap"));
+    Require(waiting.title == "Waiting in system calls" && Contains(waiting.detail, "Nap") && Contains(waiting.detail, "monitor session"));
     Require(!session.SlowCalls().empty() && session.SlowCalls().back().import == "Nap" && session.SlowCalls().back().milliseconds >= 19);
     Require(!session.RecentCalls().empty() && std::string(session.RecentCalls().back().name) == "Nap");
     Require(!session.Stale());

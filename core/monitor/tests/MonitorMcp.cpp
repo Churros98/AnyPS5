@@ -2,13 +2,16 @@
 #include "Mcp.hpp"
 #include "Session.hpp"
 #include "Snapshots.hpp"
+#include "Symbols.hpp"
 #include "prx/libc/include/CallTrace.hpp"
 #include "prx/libc/include/Telemetry.hpp"
+#include "prx/libc/include/general/ThreadName.hpp"
 #include "prx/libc/include/general/VabiMacros.hpp"
 #ifdef _WIN32
 #include <windows.h>
 #else
 #include <dlfcn.h>
+#include <pthread.h>
 #include <unistd.h>
 #endif
 #include <atomic>
@@ -56,6 +59,22 @@ static std::uint64_t ProcessId() {
 #endif
 }
 
+static std::uint64_t ThreadId() {
+#ifdef _WIN32
+    return GetCurrentThreadId();
+#else
+    return static_cast<std::uint64_t>(gettid());
+#endif
+}
+
+static void NameThread(const char* name) {
+#ifdef _WIN32
+    Require(SUCCEEDED(ThreadName::SetCurrent(name)));
+#else
+    Require(pthread_setname_np(pthread_self(), name) == 0);
+#endif
+}
+
 static bool Throws(const char* text) {
     try {
         Json::Parse(text);
@@ -75,6 +94,77 @@ static void CheckJson() {
     Require(Json(std::string("\x01")).Dump() == R"("\u0001")");
     Require(Throws("[1,]") && Throws("{\"a\" 1}") && Throws("\"open") && Throws("\"\x01\"") && Throws("[1] 2") && Throws("\"\\ud800\"") && Throws("01x") && Throws(""));
     Require(Throws(std::string(65, '[').append(65, ']').c_str()) && !Throws(std::string(64, '[').append(64, ']').c_str()));
+}
+
+template <typename TValue>
+static void Put(std::vector<char>& image, std::size_t offset, TValue value) {
+    std::memcpy(image.data() + offset, &value, sizeof(value));
+}
+
+static void CheckSymbols() {
+    constexpr std::size_t Raw = 0x400;
+    constexpr std::uint32_t Text = 0x1000;
+    const auto file = [](std::uint32_t rva) { return Raw + (rva - Text); };
+    std::vector<char> image(Raw + 0x2000, 0);
+    Put<std::uint16_t>(image, 0, 0x5a4d);
+    Put<std::uint32_t>(image, 0x3c, 0x40);
+    Put<std::uint32_t>(image, 0x40, 0x4550);
+    Put<std::uint16_t>(image, 0x44, 0x8664);
+    Put<std::uint16_t>(image, 0x46, 1);
+    Put<std::uint16_t>(image, 0x54, 240);
+    Put<std::uint16_t>(image, 0x58, 0x20b);
+    Put<std::uint32_t>(image, 0x58 + 112, 0x2000);
+    Put<std::uint32_t>(image, 0x58 + 116, 0x80);
+    Put<std::uint32_t>(image, 0x58 + 136, 0x2100);
+    Put<std::uint32_t>(image, 0x58 + 140, 36);
+    std::memcpy(image.data() + 0x148, ".text", 5);
+    Put<std::uint32_t>(image, 0x148 + 8, 0x2000);
+    Put<std::uint32_t>(image, 0x148 + 12, Text);
+    Put<std::uint32_t>(image, 0x148 + 16, 0x2000);
+    Put<std::uint32_t>(image, 0x148 + 20, Raw);
+    Put<std::uint32_t>(image, 0x148 + 36, 0x60000020);
+    Put<std::uint32_t>(image, file(0x2000) + 20, 2);
+    Put<std::uint32_t>(image, file(0x2000) + 24, 2);
+    Put<std::uint32_t>(image, file(0x2000) + 28, 0x2040);
+    Put<std::uint32_t>(image, file(0x2000) + 32, 0x2050);
+    Put<std::uint32_t>(image, file(0x2000) + 36, 0x2060);
+    Put<std::uint32_t>(image, file(0x2040), 0x1000);
+    Put<std::uint32_t>(image, file(0x2044), 0x1400);
+    Put<std::uint32_t>(image, file(0x2050), 0x2070);
+    Put<std::uint32_t>(image, file(0x2054), 0x2080);
+    Put<std::uint16_t>(image, file(0x2060), 0);
+    Put<std::uint16_t>(image, file(0x2062), 1);
+    std::memcpy(image.data() + file(0x2070), "Exported", 8);
+    std::memcpy(image.data() + file(0x2080), "Leaf", 4);
+    const std::uint32_t functions[][3] = {{0x1000, 0x1010, 0x2200}, {0x1100, 0x1180, 0x2210}, {0x1180, 0x11a0, 0x2220}};
+    for (std::size_t index = 0; index < 3; ++index) {
+        for (std::size_t field = 0; field < 3; ++field) Put<std::uint32_t>(image, file(0x2100) + index * 12 + field * 4, functions[index][field]);
+    }
+    Put<std::uint8_t>(image, file(0x2200), 1);
+    Put<std::uint8_t>(image, file(0x2210), 1);
+    Put<std::uint8_t>(image, file(0x2220), 1 | (4 << 3));
+    Put<std::uint32_t>(image, file(0x2224), 0x1100);
+    Put<std::uint32_t>(image, file(0x2228), 0x1180);
+    Put<std::uint32_t>(image, file(0x222c), 0x2210);
+    const auto path = std::filesystem::temp_directory_path() / ("anyps5-monitor-image-" + std::to_string(ProcessId()) + ".dll");
+    std::ofstream(path, std::ios::binary).write(image.data(), static_cast<std::streamsize>(image.size()));
+    std::string error;
+    const Monitor::PeImage parsed = Monitor::Symbols::ReadPeImage(path.string(), error);
+    std::filesystem::remove(path);
+    Require(error.empty() && parsed.functions.size() == 2 && parsed.ranges.size() == 3 && parsed.ranges[2].start == 0x1100);
+    const Monitor::Location exported = Monitor::Symbols::Locate(parsed, 0x1005);
+    Require(exported.function == "Exported" && exported.functionOffset == 5 && exported.functionStart == 0x1000);
+    const Monitor::Location inner = Monitor::Symbols::Locate(parsed, 0x1150);
+    Require(inner.function.empty() && inner.functionStart == 0x1100);
+    const Monitor::Location chained = Monitor::Symbols::Locate(parsed, 0x1190);
+    Require(chained.function.empty() && chained.functionStart == 0x1100);
+    const Monitor::Location gap = Monitor::Symbols::Locate(parsed, 0x1050);
+    Require(gap.function.empty() && !gap.functionStart);
+    const Monitor::Location leaf = Monitor::Symbols::Locate(parsed, 0x1450);
+    Require(leaf.function == "Leaf" && leaf.functionOffset == 0x50 && !leaf.functionStart);
+    Monitor::Location named = chained;
+    named.module = "test.dll";
+    Require(Monitor::FormatLocation(named) == "test.dll+0x1190 (function at +0x1100)");
 }
 
 static Json Call(Monitor::McpServer& server, int id, const char* method, Json parameters) {
@@ -283,17 +373,19 @@ static void CheckAgentTools(Monitor::McpServer& server) {
 
     const Json noPhases = *Tool(server, 44, "get_driver_phases").Find("structuredContent");
     Require(noPhases.Find("phases")->Items().empty() && HasText(noPhases, "note", "APS5_TRACE_SUMMARY_EVERY"));
-    const Telemetry::PhaseTotal first[] = {{"queue 0", "Driver.Packet", "draw", 1000000, 10}, {"presenter", "Driver.Present", "", 2000000, 4}};
+    const Telemetry::PhaseTotal first[] = {{"queue 0", "Driver.Packet", "draw", 1000000, 10, ThreadId()}, {"presenter", "Driver.Present", "", 2000000, 4, 0}};
     TelemetryPublishPhases_nid_no_patch(first, 2);
     std::this_thread::sleep_for(std::chrono::milliseconds(250));
     Require(!Tool(server, 63, "get_summary").Find("isError")->AsBoolean());
-    const Telemetry::PhaseTotal second[] = {{"queue 0", "Driver.Packet", "draw", 301000000, 110}, {"presenter", "Driver.Present", "", 2000000, 4}};
+    const Telemetry::PhaseTotal second[] = {{"queue 0", "Driver.Packet", "draw", 301000000, 110, ThreadId()}, {"presenter", "Driver.Present", "", 2000000, 4, 0}};
     TelemetryPublishPhases_nid_no_patch(second, 2);
     std::this_thread::sleep_for(std::chrono::milliseconds(700));
     const Json phases = *Tool(server, 45, "get_driver_phases", Json::Object({{"filter", "queue"}})).Find("structuredContent");
     Require(phases.Find("phases")->Items().size() == 1);
     const Json& packet = phases.Find("phases")->Items()[0];
     Require(packet.Find("phase")->AsString() == "Driver.Packet.draw" && packet.Find("thread")->AsString() == "queue 0" && packet.Find("total_ms")->AsNumber() == 301 && packet.Find("count")->AsNumber() == 110);
+    Require(packet.Find("thread_id")->AsNumber() == static_cast<double>(ThreadId()) && packet.Find("thread_name")->AsString() == "monitor mcp");
+    Require(Tool(server, 64, "get_driver_phases", Json::Object({{"filter", "monitor mcp"}})).Find("structuredContent")->Find("phases")->Items().size() == 1);
     Require(packet.Find("ms_per_s")->AsNumber() > 100 && packet.Find("average_us")->AsNumber() > 2999 && packet.Find("average_us")->AsNumber() < 3001);
 
     const Json threshold = *Tool(server, 46, "set_slow_threshold", Json::Object({{"microseconds", 5000}})).Find("structuredContent");
@@ -384,7 +476,9 @@ static void CheckProcess(const char* monitor) {
 }
 
 int main(int argc, char** argv) {
+    NameThread("monitor mcp");
     CheckJson();
+    CheckSymbols();
     SetVariable("APS5_TRACE_CALLS", "libTraced");
     SetVariable("APS5_PROFILE_CALLS", "3600");
     SetVariable("APS5_MONITOR_SLOW_US", "2000");

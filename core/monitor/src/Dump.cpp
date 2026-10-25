@@ -39,7 +39,7 @@ int Dump(Session& session, double seconds) {
     std::sort(threads.begin(), threads.end(), [](const ThreadRate& left, const ThreadRate& right) { return left.importMsPerSecond > right.importMsPerSecond; });
     std::printf("\nthreads (%zu):\n  %10s %10s  %s\n", threads.size(), "import ms/s", "calls/s", "thread");
     for (std::size_t index = 0; index < std::min<std::size_t>(16, threads.size()); ++index) {
-        std::printf("  %10.3f %10.0f  %llu\n", threads[index].importMsPerSecond, threads[index].callsPerSecond, static_cast<unsigned long long>(threads[index].thread));
+        std::printf("  %10.3f %10.0f  %llu %s\n", threads[index].importMsPerSecond, threads[index].callsPerSecond, static_cast<unsigned long long>(threads[index].thread), threads[index].name.c_str());
     }
 
     const auto& slow = session.SlowCalls();

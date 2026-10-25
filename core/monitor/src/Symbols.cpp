@@ -64,12 +64,13 @@ std::string Symbols::Demangle(const std::string& name) {
     return status == 0 && demangled != nullptr ? std::string(demangled.get()) : name;
 }
 
-std::vector<std::pair<std::uint64_t, std::string>> Symbols::ReadPeFunctions(const std::string& path, std::string& error) {
-    std::vector<std::pair<std::uint64_t, std::string>> functions;
+PeImage Symbols::ReadPeImage(const std::string& path, std::string& error) {
+    PeImage image;
+    auto& functions = image.functions;
     std::ifstream stream(PathFromUtf8(path), std::ios::binary);
     if (!stream) {
         error = "cannot read " + path;
-        return functions;
+        return image;
     }
     const std::vector<char> file((std::istreambuf_iterator<char>(stream)), std::istreambuf_iterator<char>());
     std::uint16_t magic = 0;
@@ -77,7 +78,7 @@ std::vector<std::pair<std::uint64_t, std::string>> Symbols::ReadPeFunctions(cons
     std::uint32_t signature = 0;
     if (!ReadAt(file, 0, magic) || magic != 0x5a4d || !ReadAt(file, 0x3c, headerOffset) || !ReadAt(file, headerOffset, signature) || signature != 0x4550) {
         error = path + " is not a PE image";
-        return functions;
+        return image;
     }
     const std::size_t fileHeader = headerOffset + 4;
     std::uint16_t sectionCount = 0;
@@ -96,7 +97,7 @@ std::vector<std::pair<std::uint64_t, std::string>> Symbols::ReadPeFunctions(cons
         if (!ReadAt(file, entry + 8, section.virtualSize) || !ReadAt(file, entry + 12, section.virtualAddress) || !ReadAt(file, entry + 16, section.rawSize) || !ReadAt(file, entry + 20, section.rawOffset) ||
             !ReadAt(file, entry + 36, section.characteristics)) {
             error = path + " has a truncated section table";
-            return functions;
+            return image;
         }
         sections.push_back(section);
     }
@@ -154,9 +155,61 @@ std::vector<std::pair<std::uint64_t, std::string>> Symbols::ReadPeFunctions(cons
             }
         }
     }
+    std::uint32_t exceptionRva = 0;
+    std::uint32_t exceptionSize = 0;
+    if (optionalSize >= 112 + 4 * 8 && ReadAt(file, optional + 136, exceptionRva) && ReadAt(file, optional + 140, exceptionSize) && exceptionRva != 0) {
+        const auto read = [&](std::uint32_t rva, std::uint32_t& begin, std::uint32_t& end, std::uint32_t& unwind) {
+            const auto offset = RvaToOffset(sections, rva);
+            return offset && ReadAt(file, *offset, begin) && ReadAt(file, *offset + 4, end) && ReadAt(file, *offset + 8, unwind);
+        };
+        for (std::uint32_t entry = 0; entry + 12 <= exceptionSize; entry += 12) {
+            std::uint32_t begin = 0;
+            std::uint32_t end = 0;
+            std::uint32_t unwind = 0;
+            if (!read(exceptionRva + entry, begin, end, unwind) || begin == 0 || end <= begin) continue;
+            std::uint32_t start = begin;
+            for (int link = 0; link < 32; ++link) {
+                std::uint32_t chainedBegin = 0;
+                std::uint32_t chainedEnd = 0;
+                std::uint32_t chainedUnwind = 0;
+                if ((unwind & 1u) != 0) {
+                    if (!read(unwind & ~1u, chainedBegin, chainedEnd, chainedUnwind)) break;
+                } else {
+                    const auto info = RvaToOffset(sections, unwind);
+                    std::uint8_t flags = 0;
+                    std::uint8_t codes = 0;
+                    if (!info || !ReadAt(file, *info, flags) || !ReadAt(file, *info + 2, codes) || ((flags >> 3) & 0x4u) == 0) break;
+                    const std::size_t chained = *info + 4 + ((codes + 1u) & ~1u) * 2u;
+                    if (!ReadAt(file, chained, chainedBegin) || !ReadAt(file, chained + 4, chainedEnd) || !ReadAt(file, chained + 8, chainedUnwind)) break;
+                }
+                if (chainedBegin == 0 || chainedBegin == start) break;
+                start = chainedBegin;
+                unwind = chainedUnwind;
+            }
+            image.ranges.push_back({begin, end, start});
+        }
+        std::sort(image.ranges.begin(), image.ranges.end(), [](const FunctionRange& left, const FunctionRange& right) { return left.begin < right.begin; });
+    }
     std::sort(functions.begin(), functions.end());
     functions.erase(std::unique(functions.begin(), functions.end(), [](const auto& left, const auto& right) { return left.first == right.first; }), functions.end());
-    return functions;
+    return image;
+}
+
+Location Symbols::Locate(const PeImage& image, std::uint64_t offset) {
+    Location location;
+    location.offset = offset;
+    const auto range = std::upper_bound(image.ranges.begin(), image.ranges.end(), offset, [](std::uint64_t value, const FunctionRange& candidate) { return value < candidate.begin; });
+    const FunctionRange* before = range == image.ranges.begin() ? nullptr : &*std::prev(range);
+    const bool inside = before != nullptr && offset < before->end;
+    if (inside) location.functionStart = before->start;
+    const auto symbol = std::upper_bound(image.functions.begin(), image.functions.end(), offset, [](std::uint64_t value, const auto& function) { return value < function.first; });
+    if (symbol == image.functions.begin()) return location;
+    const auto& [address, name] = *std::prev(symbol);
+    const std::uint64_t barrier = inside ? before->start : before != nullptr ? before->end : 0;
+    if (address < barrier) return location;
+    location.function = Demangle(name);
+    location.functionOffset = offset - address;
+    return location;
 }
 
 bool Symbols::Attach(std::uint64_t pid, std::string& error) {
@@ -239,18 +292,15 @@ Location Symbols::locate(Module& module, std::uint64_t offset) {
     if (!module.parsed) {
         module.parsed = true;
 #ifdef _WIN32
-        module.functions = ReadPeFunctions(module.path, module.error);
+        module.image = ReadPeImage(module.path, module.error);
 #else
         module.error = "function names are read from PE images only";
 #endif
     }
-    Location location{module.name, module.path, module.base, offset, {}, 0};
-    const auto found = std::upper_bound(module.functions.begin(), module.functions.end(), offset, [](std::uint64_t value, const auto& function) { return value < function.first; });
-    if (found != module.functions.begin()) {
-        const auto& function = *std::prev(found);
-        location.function = Demangle(function.second);
-        location.functionOffset = offset - function.first;
-    }
+    Location location = Locate(module.image, offset);
+    location.module = module.name;
+    location.path = module.path;
+    location.moduleBase = module.base;
     return location;
 }
 
@@ -296,6 +346,9 @@ std::string FormatLocation(const Location& location) {
     if (!location.function.empty()) {
         std::snprintf(offset, sizeof(offset), "+0x%llx", static_cast<unsigned long long>(location.functionOffset));
         text += " (" + location.function + offset + ")";
+    } else if (location.functionStart) {
+        std::snprintf(offset, sizeof(offset), "+0x%llx", static_cast<unsigned long long>(*location.functionStart));
+        text += std::string(" (function at ") + offset + ")";
     }
     return text;
 }

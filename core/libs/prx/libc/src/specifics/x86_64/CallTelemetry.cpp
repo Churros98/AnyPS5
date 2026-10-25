@@ -301,6 +301,7 @@ void TelemetryPublishPhases_nid_no_patch(const Telemetry::PhaseTotal* totals, st
         PublishEntry(g_block->phases[index], [&total = totals[index]](Telemetry::Phase& target) {
             target.nanoseconds = total.nanoseconds;
             target.count = total.count;
+            target.threadId = total.threadId;
             CopyName(target.thread, sizeof(target.thread), total.thread);
             const std::string name = std::string(total.scope != nullptr ? total.scope : "") + (total.stage != nullptr && *total.stage != '\0' ? std::string(".") + total.stage : std::string());
             CopyName(target.name, sizeof(target.name), name.c_str());

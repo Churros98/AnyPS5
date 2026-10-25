@@ -214,17 +214,17 @@ claude mcp add anyps5 -- <build>/core/monitor/anyps5-monitor --mcp
 | `connect` | reads `pid`, or the only publishing process without it |
 | `get_summary` | frames per second, frame time percentiles, GPU and agc driver time per frame (null when not timed) and the verdict of the Budget tab |
 | `get_imports` | imports sorted by `sort_by` (`exclusive`, `inclusive`, `calls`, `average`, `p99`, `max`, `total`), filtered by `filter`, at most `limit`, over `window_seconds` |
-| `get_threads` | milliseconds per second each thread spends in traced imports |
+| `get_threads` | milliseconds per second each thread spends in traced imports, with the name the thread was given |
 | `get_slow_calls` | slow calls after `since`, at least `min_ms` long, with `next_since` for the next request |
 | `get_frames` | the last `count` frames |
 | `get_recent_calls` | the newest traced calls with thread and caller |
 | `sample` | waits `seconds`, then returns the summary, the busiest imports and threads and the slow calls of the sample |
-| `resolve_address` | the module, offset and nearest function of each address (`0x...` or `module+0x...`) |
+| `resolve_address` | the module, offset and function of each address (`0x...` or `module+0x...`); a symbol is kept only inside the `.pdata` function that holds the address, otherwise the function's start is given |
 | `list_modules` | the modules of the process with base, size and path |
 | `sample_stacks` | samples every thread for `milliseconds` every `interval_us` up to `depth` frames, then returns the functions with the most own and total samples and the hottest stacks |
 | `watch_import` | records the next `count` calls of a timed import |
 | `get_watched_calls` | the recorded calls with `rdi`, `rsi`, `rdx`, `rcx`, `r8`, `r9`, the return value, the duration and the caller |
-| `get_driver_phases` | the `PerformanceTimer` scopes of every traced agc driver thread with milliseconds per second and mean duration |
+| `get_driver_phases` | the `PerformanceTimer` scopes of every traced agc driver thread, by thread id and name, with milliseconds per second and mean duration |
 | `set_slow_threshold` | changes `APS5_MONITOR_SLOW_US` of the running title |
 | `save_snapshot`, `list_snapshots`, `compare_snapshots` | store the summary and the import, thread and phase rates under a name in `<temp>/anyps5-telemetry/snapshots`, and compare two of them |
 | `list_memory_regions`, `read_memory`, `search_memory` | the committed regions of the process, its bytes as hex or values, and the addresses of a value; they only read |

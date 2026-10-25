@@ -184,6 +184,8 @@ public:
     TraceThread(std::string name, const std::atomic<std::uint64_t>& presents, std::size_t capacity = DefaultCapacity, const std::atomic<bool>& buffering = AlwaysBuffering)
         : name(std::move(name)), presents(presents), buffering(buffering), slices(std::make_unique<Slice[]>(capacity)), capacity(capacity) {}
 
+    std::uint64_t threadId = 0;
+
     TraceThread(const TraceThread&) = delete;
     TraceThread& operator=(const TraceThread&) = delete;
 

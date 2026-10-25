@@ -26,6 +26,7 @@ add_library(anyps5_monitor_session STATIC
         ${CMAKE_CURRENT_SOURCE_DIR}/src/Memory.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/src/Snapshots.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/src/Symbols.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/ThreadNames.cpp
 )
 target_include_directories(anyps5_monitor_session PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/core/libs)
 

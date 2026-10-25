@@ -25,6 +25,11 @@ ViewState& State() {
     return state;
 }
 
+std::string ThreadLabel(const Session& session, std::uint64_t thread) {
+    const std::string name = session.ThreadName(thread);
+    return name.empty() ? std::to_string(thread) : std::to_string(thread) + " " + name;
+}
+
 bool Contains(const std::string& text, const char* filter) {
     if (*filter == '\0') return true;
     std::string haystack = text;
@@ -91,7 +96,7 @@ void DrawBudget(Session& session) {
     std::vector<ThreadRate> threads = session.Threads();
     std::sort(threads.begin(), threads.end(), [](const ThreadRate& left, const ThreadRate& right) { return left.importMsPerSecond > right.importMsPerSecond; });
     for (std::size_t index = 0; index < std::min<std::size_t>(4, threads.size()); ++index) {
-        const std::string label = "thread " + std::to_string(threads[index].thread) + " in imports";
+        const std::string label = "thread " + ThreadLabel(session, threads[index].thread) + " in imports";
         Bar(label.c_str(), frames.fps > 0 ? threads[index].importMsPerSecond / frames.fps : 0, frames.averageMs, "ms");
     }
 }
@@ -216,7 +221,7 @@ void DrawThreads(Session& session) {
     for (const ThreadRate& thread : threads) {
         ImGui::TableNextRow();
         ImGui::TableNextColumn();
-        ImGui::Text("%llu", static_cast<unsigned long long>(thread.thread));
+        ImGui::TextUnformatted(ThreadLabel(session, thread.thread).c_str());
         ImGui::TableNextColumn();
         ImGui::ProgressBar(static_cast<float>(std::clamp(thread.importMsPerSecond / 1000.0, 0.0, 1.0)), ImVec2(-1, 0), (std::to_string(static_cast<int>(thread.importMsPerSecond)) + " ms/s").c_str());
         ImGui::TableNextColumn();
@@ -253,7 +258,7 @@ void DrawSlowCalls(Session& session) {
         ImGui::TableNextColumn();
         ImGui::Text("%.3f", call->milliseconds);
         ImGui::TableNextColumn();
-        ImGui::Text("%llu", static_cast<unsigned long long>(call->thread));
+        ImGui::TextUnformatted(ThreadLabel(session, call->thread).c_str());
         ImGui::TableNextColumn();
         ImGui::Text("0x%016llx", static_cast<unsigned long long>(call->returnAddress));
         ImGui::TableNextColumn();
@@ -274,7 +279,7 @@ void DrawRecentCalls(Session& session) {
     for (auto call = calls.rbegin(); call != calls.rend(); ++call) {
         ImGui::TableNextRow();
         ImGui::TableNextColumn();
-        ImGui::Text("%llu", static_cast<unsigned long long>(call->thread));
+        ImGui::TextUnformatted(ThreadLabel(session, call->thread).c_str());
         ImGui::TableNextColumn();
         ImGui::Text("0x%016llx", static_cast<unsigned long long>(call->returnAddress));
         ImGui::TableNextColumn();

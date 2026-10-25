@@ -4,6 +4,7 @@
 #include "prx/libSceAgcDriver/Execution/include/ProfileOutput.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Driver/Driver.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Driver/Draw/DrawPipeline.hpp"
+#include "prx/libSceAgcDriver/Execution/include/Driver/Queues/WorkerAffinity.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Driver/Shaders/ShaderRegistry.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/PipelineLibrary.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Driver/Diagnostics.hpp"
@@ -1637,6 +1638,7 @@ private:
 
     static void* Main(void* argument) {
         auto& pool = *static_cast<RegistrationPreparePool*>(argument);
+        AgcDriver::DriverDetail::NameWorkerThread("shader prepare");
         if (PerformanceTrace::Configured()) PerformanceTrace::BindThread("shader prepare", TraceThread::DefaultCapacity / 8);
         for (;;) {
             Task task;

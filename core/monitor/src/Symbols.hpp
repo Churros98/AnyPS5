@@ -16,6 +16,18 @@ struct Location {
     std::uint64_t offset = 0;
     std::string function;
     std::uint64_t functionOffset = 0;
+    std::optional<std::uint64_t> functionStart;
+};
+
+struct FunctionRange {
+    std::uint64_t begin = 0;
+    std::uint64_t end = 0;
+    std::uint64_t start = 0;
+};
+
+struct PeImage {
+    std::vector<std::pair<std::uint64_t, std::string>> functions;
+    std::vector<FunctionRange> ranges;
 };
 
 class Symbols {
@@ -27,7 +39,7 @@ public:
         std::uint64_t size = 0;
         bool parsed = false;
         std::string error;
-        std::vector<std::pair<std::uint64_t, std::string>> functions;
+        PeImage image;
     };
 
     bool Attach(std::uint64_t pid, std::string& error);
@@ -37,7 +49,8 @@ public:
     std::optional<std::uint64_t> Parse(const std::string& text);
     std::vector<Module>& Modules();
 
-    static std::vector<std::pair<std::uint64_t, std::string>> ReadPeFunctions(const std::string& path, std::string& error);
+    static PeImage ReadPeImage(const std::string& path, std::string& error);
+    static Location Locate(const PeImage& image, std::uint64_t offset);
     static std::string Demangle(const std::string& name);
 
 private:

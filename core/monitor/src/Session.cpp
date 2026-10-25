@@ -65,6 +65,7 @@ bool Session::Connect(std::uint64_t pid) {
     Disconnect();
     if (!_reader.Open(pid)) return false;
     _pid = pid;
+    _threadNames.Attach(pid);
     _header = _reader.ReadHeader();
     _connectedAt = Clock::now();
     _lastChange = _connectedAt;
@@ -141,6 +142,10 @@ bool Session::LoadDefaultNames() {
     if (path.empty() || !std::filesystem::is_regular_file(path, error)) return false;
     LoadNames(path.string());
     return true;
+}
+
+std::string Session::ThreadName(std::uint64_t thread) const {
+    return _threadNames.Name(thread);
 }
 
 std::string Session::DisplayName(const std::string& name) const {
@@ -260,12 +265,14 @@ void Session::computeRates() {
         Telemetry::Phase previous{};
         if (oldest != &newest) {
             const auto found = std::find_if(oldest->phases.begin(), oldest->phases.end(), [&current](const Telemetry::Phase& phase) {
-                return std::strcmp(phase.thread, current.thread) == 0 && std::strcmp(phase.name, current.name) == 0;
+                return phase.threadId == current.threadId && std::strcmp(phase.thread, current.thread) == 0 && std::strcmp(phase.name, current.name) == 0;
             });
             if (found != oldest->phases.end()) previous = *found;
         }
         PhaseRate rate;
         rate.thread = current.thread;
+        rate.threadId = current.threadId;
+        rate.threadName = ThreadName(current.threadId);
         rate.name = current.name;
         rate.totalMs = static_cast<double>(current.nanoseconds) / 1e6;
         rate.count = current.count;
@@ -282,6 +289,7 @@ void Session::computeRates() {
         }
         ThreadRate rate;
         rate.thread = current.thread;
+        rate.name = ThreadName(current.thread);
         rate.importMsPerSecond = milliseconds(current.topLevelTicks - std::min(previous.topLevelTicks, current.topLevelTicks)) * perSecond;
         rate.callsPerSecond = static_cast<double>(current.timedCalls - std::min(previous.timedCalls, current.timedCalls)) * perSecond;
         _threads.push_back(rate);
@@ -387,7 +395,7 @@ Verdict Session::Judge() const {
             std::sort(top.begin(), top.end(), [](const ImportRate& left, const ImportRate& right) { return left.exclusiveMsPerSecond > right.exclusiveMsPerSecond; });
             std::string names;
             for (std::size_t index = 0; index < std::min<std::size_t>(3, top.size()); ++index) names += (index == 0 ? "" : ", ") + DisplayName(top[index].name) + " (" + Fixed(top[index].exclusiveMsPerSecond, 1) + " ms/s)";
-            return {"Waiting in system calls", "Thread " + std::to_string(busiest->thread) + " spends " + Fixed(perFrame, 1) + " ms of each " + budget + " in traced imports. Most exclusive time: " + names + "."};
+            return {"Waiting in system calls", "Thread " + std::to_string(busiest->thread) + (busiest->name.empty() ? std::string() : " '" + busiest->name + "'") + " spends " + Fixed(perFrame, 1) + " ms of each " + budget + " in traced imports. Most exclusive time: " + names + "."};
         }
     }
     std::string missing;

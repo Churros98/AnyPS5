@@ -225,7 +225,7 @@ void PublishPhases(const std::vector<std::unique_ptr<TraceThread>>& threads, Clo
     for (const auto& thread : threads) {
         snapshots.push_back(thread->Collect());
         for (const auto& total : snapshots.back().totals) {
-            totals.push_back({snapshots.back().name.c_str(), total.scope, total.stage, static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(total.length).count()), total.count});
+            totals.push_back({snapshots.back().name.c_str(), total.scope, total.stage, static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(total.length).count()), total.count, thread->threadId});
         }
     }
     TelemetryPublishPhases_nid_no_patch(totals.data(), totals.size());
@@ -239,6 +239,11 @@ void PerformanceTrace::BindThread(const char* name, std::size_t capacity) {
     const bool windowed = std::getenv("APS5_TRACE_FRAMES") != nullptr || std::getenv("APS5_TRACE_SECONDS") != nullptr;
     if (windowed && capacity == TraceThread::DefaultCapacity) capacity = TraceThread::ParseCapacity(std::getenv("APS5_TRACE_EVENTS"));
     auto bound = std::make_unique<TraceThread>(name, presentCount, windowed ? capacity : 0, buffering);
+#ifdef _WIN32
+    bound->threadId = GetCurrentThreadId();
+#else
+    bound->threadId = static_cast<std::uint64_t>(gettid());
+#endif
     auto& state = session();
     std::lock_guard lock(state.mutex);
     local = bound.get();

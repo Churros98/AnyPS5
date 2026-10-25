@@ -1,6 +1,7 @@
 #ifndef CORE_MONITOR_SRC_SESSION_HPP
 #define CORE_MONITOR_SRC_SESSION_HPP
 
+#include "ThreadNames.hpp"
 #include "prx/libc/include/TelemetryReader.hpp"
 #include <chrono>
 #include <cstdint>
@@ -30,6 +31,7 @@ struct ImportRate {
 
 struct ThreadRate {
     std::uint64_t thread = 0;
+    std::string name;
     double importMsPerSecond = 0;
     double callsPerSecond = 0;
 };
@@ -83,6 +85,8 @@ struct WatchedCallView {
 
 struct PhaseRate {
     std::string thread;
+    std::uint64_t threadId = 0;
+    std::string threadName;
     std::string name;
     double msPerSecond = 0;
     double totalMs = 0;
@@ -113,6 +117,7 @@ public:
     static std::filesystem::path DefaultNamesPath();
     bool LoadDefaultNames();
     std::string DisplayName(const std::string& name) const;
+    std::string ThreadName(std::uint64_t thread) const;
 
     const Telemetry::Header& Header() const;
     const std::vector<ImportRate>& Imports() const;
@@ -164,6 +169,7 @@ private:
     std::vector<PhaseRate> _phases;
     std::vector<std::string> _importNames;
     std::unordered_map<std::string, std::string> _names;
+    mutable ThreadNames _threadNames;
     double _windowSeconds = 1.0;
     Clock::time_point _connectedAt{};
 };

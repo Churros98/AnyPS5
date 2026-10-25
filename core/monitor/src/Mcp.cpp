@@ -338,7 +338,7 @@ Json McpServer::threads(const Json& arguments) {
     std::sort(rows.begin(), rows.end(), [](const ThreadRate& left, const ThreadRate& right) { return left.importMsPerSecond > right.importMsPerSecond; });
     Json list = Json::Array();
     for (std::size_t index = 0; index < std::min(limit, rows.size()); ++index) {
-        list.Push(Json::Object({{"thread", rows[index].thread}, {"import_ms_per_s", rows[index].importMsPerSecond}, {"calls_per_s", rows[index].callsPerSecond}}));
+        list.Push(Json::Object({{"thread", rows[index].thread}, {"thread_name", rows[index].name}, {"import_ms_per_s", rows[index].importMsPerSecond}, {"calls_per_s", rows[index].callsPerSecond}}));
     }
     return Json::Object({{"window_seconds", _session.WindowSeconds()}, {"threads", std::move(list)}});
 }
@@ -360,7 +360,7 @@ Json McpServer::slowCalls(const Json& arguments) {
     Json list = Json::Array();
     for (std::size_t index = rows.size() > limit ? rows.size() - limit : 0; index < rows.size(); ++index) {
         const SlowCallView& call = *rows[index];
-        list.Push(Json::Object({{"index", call.index}, {"import", call.import}, {"display_name", _session.DisplayName(call.import)}, {"thread", call.thread}, {"ms", call.milliseconds},
+        list.Push(Json::Object({{"index", call.index}, {"import", call.import}, {"display_name", _session.DisplayName(call.import)}, {"thread", call.thread}, {"thread_name", _session.ThreadName(call.thread)}, {"ms", call.milliseconds},
             {"caller", Address(call.returnAddress)}}));
     }
     const Telemetry::Header& header = _session.Header();
@@ -389,7 +389,7 @@ Json McpServer::recentCalls(const Json& arguments) {
     const auto& all = _session.RecentCalls();
     Json list = Json::Array();
     for (std::size_t index = all.size() > limit ? all.size() - limit : 0; index < all.size(); ++index) {
-        list.Push(Json::Object({{"thread", all[index].thread}, {"caller", Address(all[index].returnAddress)}, {"library", all[index].library}, {"name", all[index].name},
+        list.Push(Json::Object({{"thread", all[index].thread}, {"thread_name", _session.ThreadName(all[index].thread)}, {"caller", Address(all[index].returnAddress)}, {"library", all[index].library}, {"name", all[index].name},
             {"display_name", _session.DisplayName(all[index].name)}}));
     }
     return Json::Object({{"calls", std::move(list)}});
@@ -470,9 +470,10 @@ Json McpServer::describe(std::uint64_t address) {
         if (table.Attach(_session.Pid(), error)) location = table.Resolve(address);
     }
     if (!location) return Json::Object({{"address", Address(address)}, {"module", Json()}, {"text", Address(address)}});
+    if (!location->function.empty()) location->function = _session.DisplayName(location->function);
     return Json::Object({{"address", Address(address)}, {"module", location->module}, {"offset", Address(location->offset)},
         {"function", location->function.empty() ? Json() : Json(location->function)}, {"function_offset", location->function.empty() ? Json() : Json(Address(location->functionOffset))},
-        {"text", FormatLocation(*location)}});
+        {"function_start", location->functionStart ? Json(Address(*location->functionStart)) : Json()}, {"text", FormatLocation(*location)}});
 }
 
 Json McpServer::resolveAddress(const Json& arguments) {
@@ -551,6 +552,11 @@ Json McpServer::sampleStacks(const Json& arguments) {
         if (plus != std::string::npos) {
             const auto location = table.ResolveModuleOffset(frame.substr(0, plus), std::strtoull(frame.c_str() + plus + 1, nullptr, 16));
             if (location && !location->function.empty()) text = location->module + "!" + _session.DisplayName(location->function);
+            else if (location && location->functionStart) {
+                char start[24];
+                std::snprintf(start, sizeof(start), "+0x%llx", static_cast<unsigned long long>(*location->functionStart));
+                text = location->module + "!" + start;
+            }
         }
         return names.emplace(frame, std::move(text)).first->second;
     };
@@ -599,10 +605,10 @@ Json McpServer::sampleStacks(const Json& arguments) {
     for (std::size_t index = 0; index < std::min(top, stacks.size()); ++index) {
         Json frames = Json::Array();
         for (auto frame = stacks[index].frames.rbegin(); frame != stacks[index].frames.rend() && frames.Items().size() < 16; ++frame) frames.Push(name(*frame));
-        hottest.Push(Json::Object({{"thread", stacks[index].thread}, {"samples", stacks[index].count}, {"frames_leaf_first", std::move(frames)}}));
+        hottest.Push(Json::Object({{"thread", stacks[index].thread}, {"thread_name", _session.ThreadName(stacks[index].thread)}, {"samples", stacks[index].count}, {"frames_leaf_first", std::move(frames)}}));
     }
     Json threadList = Json::Array();
-    for (const auto& [id, samples] : perThread) threadList.Push(Json::Object({{"thread", id}, {"samples", samples}}));
+    for (const auto& [id, samples] : perThread) threadList.Push(Json::Object({{"thread", id}, {"thread_name", _session.ThreadName(id)}, {"samples", samples}}));
     return Json::Object({{"file", result.message}, {"capture", header}, {"samples", total}, {"waiting_samples_left_out", waited}, {"threads", std::move(threadList)}, {"self", ranked(self)},
         {"inclusive", ranked(inclusive)}, {"stacks", std::move(hottest)}});
 }
@@ -642,7 +648,7 @@ Json McpServer::watchedCalls(const Json& arguments) {
         const WatchedCallView& call = *rows[index];
         Json registers = Json::Array();
         for (const std::uint64_t value : call.arguments) registers.Push(Address(value));
-        list.Push(Json::Object({{"index", call.index}, {"import", call.import}, {"display_name", _session.DisplayName(call.import)}, {"thread", call.thread}, {"ms", call.milliseconds},
+        list.Push(Json::Object({{"index", call.index}, {"import", call.import}, {"display_name", _session.DisplayName(call.import)}, {"thread", call.thread}, {"thread_name", _session.ThreadName(call.thread)}, {"ms", call.milliseconds},
             {"arguments", std::move(registers)}, {"result", Address(call.result)}, {"result_signed", static_cast<double>(static_cast<std::int64_t>(call.result))}, {"caller", describe(call.returnAddress)}}));
     }
     return Json::Object({{"next_since", next}, {"note", "arguments are rdi, rsi, rdx, rcx, r8 and r9 as the import received them; floating-point arguments are not recorded"}, {"calls", std::move(list)}});
@@ -655,12 +661,12 @@ Json McpServer::driverPhases(const Json& arguments) {
     _session.Poll();
     std::vector<PhaseRate> rows;
     for (const PhaseRate& phase : _session.Phases()) {
-        if (Matches(filter, {phase.thread, phase.name})) rows.push_back(phase);
+        if (Matches(filter, {phase.thread, phase.threadName, phase.name})) rows.push_back(phase);
     }
     std::stable_sort(rows.begin(), rows.end(), [](const PhaseRate& left, const PhaseRate& right) { return left.msPerSecond > right.msPerSecond; });
     Json list = Json::Array();
     for (std::size_t index = 0; index < std::min(limit, rows.size()); ++index) {
-        list.Push(Json::Object({{"thread", rows[index].thread}, {"phase", rows[index].name}, {"ms_per_s", rows[index].msPerSecond}, {"average_us", rows[index].averageUs}, {"total_ms", rows[index].totalMs},
+        list.Push(Json::Object({{"thread", rows[index].thread}, {"thread_id", rows[index].threadId}, {"thread_name", rows[index].threadName}, {"phase", rows[index].name}, {"ms_per_s", rows[index].msPerSecond}, {"average_us", rows[index].averageUs}, {"total_ms", rows[index].totalMs},
             {"count", rows[index].count}}));
     }
     Json result = Json::Object({{"window_seconds", _session.WindowSeconds()}, {"phases", std::move(list)}});

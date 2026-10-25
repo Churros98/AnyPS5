@@ -3,7 +3,11 @@
 #include "prx/libSceAgcDriver/Execution/include/TracyZone.hpp"
 #include "prx/libc/include/CpuTopology.hpp"
 #include "prx/libc/include/general/ThreadName.hpp"
+#include <cstdio>
 #include <cstdlib>
+#ifndef _WIN32
+#include <pthread.h>
+#endif
 
 namespace AgcDriver::DriverDetail {
 
@@ -21,12 +25,20 @@ std::uint64_t WorkerAffinityMask() {
     return mask;
 }
 
-void PinWorkerThread(const char* role) {
+void NameWorkerThread(const char* role) {
     TracyZone::NameThread(role);
 #ifdef _WIN32
     const HRESULT nameResult = ThreadName::SetCurrent(role);
     if (FAILED(nameResult)) std::fprintf(stderr, "[thread-name] could not name %s (0x%08lx)\n", role, static_cast<unsigned long>(nameResult));
+#else
+    char name[16];
+    std::snprintf(name, sizeof(name), "%s", role);
+    pthread_setname_np(pthread_self(), name);
 #endif
+}
+
+void PinWorkerThread(const char* role) {
+    NameWorkerThread(role);
     const auto mask = WorkerAffinityMask();
     if (mask == 0) return;
     static std::once_flag summary;
