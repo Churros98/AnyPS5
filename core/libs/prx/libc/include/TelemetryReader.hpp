@@ -142,7 +142,8 @@ public:
         const std::uint64_t count = std::min<std::uint64_t>(Load(_block->header.imports), ImportCapacity);
         for (std::uint64_t index = 0; index < count; ++index) {
             Import entry{};
-            if (ReadEntry(_block->imports[index], entry)) imports.push_back(entry);
+            if (!ReadEntry(_block->imports[index], entry)) entry = Import{};
+            imports.push_back(entry);
         }
         return imports;
     }

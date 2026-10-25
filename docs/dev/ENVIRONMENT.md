@@ -15,6 +15,12 @@ The code reads environment names through `getenv`, `IsEnvironmentSet`, `kibSetti
 | `APS5_SKIP_TIMING_TESTS` | presence | `core/libs/tests/PreciseWait.cpp` |  | treats the timing tests' runner as preempted, so they skip without probing the clock |
 | `APS5_USBD_DEVICE` | string | `core/libs/tests/GuestUsbd.cpp` |  | selects the USB device a test drives, as vendor:product in hex |
 
+### core/monitor
+
+| Name | Kind | Source | Default | Description |
+|------|------|--------|---------|-------------|
+| `ANYPS5_NID_DB` | string | `core/monitor/src/Session.cpp` | `<temp>/anyps5-nid-db/aerolib.csv` | NID database the monitor names imports from when `--nid-names` is not given, as for `tools/nid_names.py` |
+
 ### core/relinker
 
 | Name | Kind | Source | Default | Description |

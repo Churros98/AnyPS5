@@ -1,0 +1,17 @@
+foreach(runtimeLinkFlag IN ITEMS -static-libgcc -static-libstdc++ -static)
+    string(REPLACE "${runtimeLinkFlag}" "" CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS}")
+endforeach()
+string(STRIP "${CMAKE_EXE_LINKER_FLAGS}" CMAKE_EXE_LINKER_FLAGS)
+get_directory_property(anyps5LibsCompileOptions DIRECTORY ${CMAKE_SOURCE_DIR}/core/libs COMPILE_OPTIONS)
+
+add_test_executable(anyps5_monitor_session_tests ${CMAKE_CURRENT_SOURCE_DIR}/MonitorSession.cpp)
+target_compile_options(anyps5_monitor_session_tests PRIVATE ${anyps5LibsCompileOptions})
+target_link_libraries(anyps5_monitor_session_tests PRIVATE anyps5_monitor_session libc)
+configure_windows_unwind(anyps5_monitor_session_tests)
+add_test(NAME anyps5_monitor_session COMMAND anyps5_monitor_session_tests)
+add_test(NAME anyps5_monitor_dump COMMAND guest_telemetry_tests monitor $<TARGET_FILE:anyps5_monitor>)
+set_tests_properties(anyps5_monitor_session anyps5_monitor_dump PROPERTIES TIMEOUT 20)
+if(WIN32)
+    set_tests_properties(anyps5_monitor_session anyps5_monitor_dump PROPERTIES ENVIRONMENT_MODIFICATION
+        "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
+endif()

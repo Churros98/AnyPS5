@@ -164,4 +164,28 @@ int main(int argc, char** argv) {
 
     const auto discovery = std::filesystem::temp_directory_path() / "anyps5-telemetry" / std::to_string(ProcessId());
     Require(std::filesystem::exists(discovery));
+
+    if (argc == 3 && std::strcmp(argv[1], "monitor") == 0) {
+        const std::string command = "\"\"" + std::string(argv[2]) + "\" --dump --pid " + std::to_string(ProcessId()) + " --seconds 0.5\"";
+#ifdef _WIN32
+        FILE* output = _popen(command.c_str(), "r");
+#else
+        FILE* output = popen(command.substr(1, command.size() - 2).c_str(), "r");
+#endif
+        Require(output != nullptr);
+        std::string text;
+        char buffer[4096];
+        while (std::fgets(buffer, sizeof(buffer), output) != nullptr) text += buffer;
+#ifdef _WIN32
+        const int status = _pclose(output);
+#else
+        const int status = pclose(output);
+#endif
+        std::fputs(text.c_str(), stdout);
+        Require(status == 0 || status == 2 || (status >> 8) == 2);
+        Require(text.find("pid " + std::to_string(ProcessId())) != std::string::npos);
+        Require(text.find("libTraced.prx Integers") != std::string::npos && text.find("libTraced.prx Nap") != std::string::npos);
+        Require(text.find("slow calls (2,") != std::string::npos);
+        Require(text.find("verdict:") != std::string::npos);
+    }
 }

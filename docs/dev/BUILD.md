@@ -116,7 +116,7 @@ Project switches accept `ON` or `OFF`:
 | `-DANYPS5_USE_SYSTEM_DEPS=ON`    | `OFF`   | Resolve SDL2, freetype, Vulkan-Headers, SPIRV-Headers, glslang and SPIRV-Tools from the system instead of the submodules. |
 | `-DAPS5_ENABLE_TIMING_LOG=ON`    | `OFF`   | Compile frame timing logging.                    |
 | `-DAPS5_ENABLE_TRACY=ON`         | `OFF`   | Build the [Tracy](#tracy) profiler client into the agc driver. |
-| `-DAPS5_ENABLE_PROFILER=ON`      | `OFF`   | Build the [import call profiler](#import-call-profiler) into libc. |
+| `-DAPS5_ENABLE_PROFILER=ON`      | `OFF`   | Build the [import call profiler](#import-call-profiler) into libc and the [monitor](#monitor). |
 | `-DAPS5_AGC_CREATE_LOG=OFF`      | `ON`    | Disable successful `sceAgcCreateShader` logging. |
 | `-DAGC_BUILD_VISUAL_TEST=ON`     | `OFF`   | Build the standalone AGC SPIR-V visual test.     |
 
@@ -182,6 +182,23 @@ With the flag, the first traced import or present makes libc create a shared mem
 - A timed call that takes at least `APS5_MONITOR_SLOW_US` microseconds (1 to 60,000,000; default 1000) is appended to a ring of 4096 slow calls with its import, thread, duration and caller.
 
 Each table entry and ring slot carries a sequence number that is odd while it is written; a reader copies an entry and keeps it when the number was even and unchanged. With `APS5_PROFILE_CALLS=0` only the presents and the call counts are published.
+
+### Monitor
+
+The flag also builds `anyps5-monitor` (`core/monitor`, target `anyps5_monitor`) from the `3rdparty/imgui` submodule (Dear ImGui 1.91.9b, SDL2 and Vulkan backends); configuring with the flag fails when the submodule is missing. It loads Vulkan through SDL at run time, so no Vulkan SDK is needed.
+
+```
+anyps5-monitor [--pid <pid>] [--nid-names <file>] [--window <seconds>] [--dump [--seconds <seconds>]]
+```
+
+Without `--pid` the window connects to the process with the highest id listed in `<temp>/anyps5-telemetry`, and to the next one when that process stops publishing for 2 seconds; the last data stays on screen. Rates are taken over `--window` seconds (0.2 to 30, default 1). Import names come from the NID database given by `--nid-names`, else `ANYPS5_NID_DB`, else the copy `tools/nid_names.py` downloads to `<temp>/anyps5-nid-db/aerolib.csv`; without one the monitor says so on stderr and shows NIDs. The tabs:
+
+- Budget: a verdict for the last second and bars of the frame time, GPU time (`APS5_PROFILE_GPU=1`), agc driver time (`APS5_PROFILE_DRAW=1`) and the time the busiest threads spend in traced imports per frame.
+- Frames: frames per second, frame time percentiles and plots of the last 1024 frames.
+- Imports: every published import with exclusive and inclusive milliseconds per second, calls per second, mean, p50 and p99 over the window, longest call and totals; sortable and filtered by name or library.
+- Threads, Slow calls (newest first, filtered by duration and name, can be paused) and Last calls.
+
+`--dump` waits `--seconds` (default 1.5), prints the same figures as text and exits with 0, or 2 when the process stopped publishing. The `anyps5_monitor_dump` test runs it against `guest_telemetry_tests`. The limits are listed in the [monitor](debt/monitor.md) technical debt.
 
 ## Compute pipeline replay
 
