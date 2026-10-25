@@ -394,7 +394,7 @@ CodeKind RunningCode(DWORD64 rip, DWORD64& base) {
     base = ImageBase(rip);
     auto kind = CachedKind(base);
     if (kind == CodeKind::Unknown && Images().count.load(std::memory_order_acquire) >= ImageKinds::Capacity) kind = CodeKind::Host;
-    return kind == CodeKind::Host && BlockedInWait(rip) ? CodeKind::Guest : kind;
+    return kind;
 }
 
 bool RaiseOn(Pthread thread, GuestExceptionHandler handler, int signum) {
@@ -443,7 +443,7 @@ bool RaiseOn(Pthread thread, GuestExceptionHandler handler, int signum) {
         DWORD64 image = 0;
         const auto running = restoring ? CodeKind::Guest : RunningCode(delivery.context.Rip, image);
         const auto now = std::chrono::steady_clock::now();
-        if (running == CodeKind::Host && InSystemCall(delivery.context.Rip, image) && now < retryDeadline) hostDeadline = std::max(hostDeadline, std::min(retryDeadline, now + HostCodeLimit));
+        if (running == CodeKind::Host && InSystemCall(delivery.context.Rip, image) && !BlockedInWait(delivery.context.Rip) && now < retryDeadline) hostDeadline = std::max(hostDeadline, std::min(retryDeadline, now + HostCodeLimit));
         if (!restoring && (running == CodeKind::Guest || (running == CodeKind::Host && now >= hostDeadline))) break;
         ResumeThread(native);
         if (running == CodeKind::Unknown) {
