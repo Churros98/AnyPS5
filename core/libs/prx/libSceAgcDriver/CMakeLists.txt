@@ -423,6 +423,9 @@ target_link_libraries(libSceAgcDriver PRIVATE
         libzstd_static
         ${CMAKE_DL_LIBS}
 )
+if(APS5_ENABLE_PROFILER)
+    target_compile_definitions(libSceAgcDriver PRIVATE APS5_ENABLE_PROFILER=1)
+endif()
 if(APS5_ENABLE_TRACY)
     target_link_libraries(libSceAgcDriver PUBLIC TracyClient)
 endif()

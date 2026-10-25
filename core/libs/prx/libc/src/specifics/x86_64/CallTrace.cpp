@@ -8,6 +8,9 @@
 #endif
 #include "prx/libc/include/CallTrace.hpp"
 #include "prx/libc/include/CallTraceInternal.hpp"
+#ifdef APS5_ENABLE_PROFILER
+#include "prx/libc/include/Telemetry.hpp"
+#endif
 #include "prx/libc/include/general/AsmMacros.hpp"
 #include <atomic>
 #include <cstddef>
@@ -133,6 +136,7 @@ void* TraceImport_nid_no_patch(void* target, const char* name, const char* libra
 #endif
 #ifdef APS5_ENABLE_PROFILER
         g_profiling = CallProfileStart_nid_no_patch();
+        TelemetryEnabled_nid_no_patch();
 #endif
     }
 #ifdef __linux__

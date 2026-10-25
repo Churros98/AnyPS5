@@ -1,4 +1,7 @@
 #include "prx/libSceAgcDriver/Execution/include/ProfileOutput.hpp"
+#ifdef APS5_ENABLE_PROFILER
+#include "prx/libc/include/Telemetry.hpp"
+#endif
 #include "prx/libSceAgcDriver/Execution/include/FrameDumpIo.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/PipelineSpecialization.hpp"
 #include "prx/libSceAgcDriver/Execution/include/CaptureTrace.hpp"
@@ -3648,6 +3651,21 @@ bool VulkanDevice::present(std::uint32_t width, std::uint32_t height, bool opaqu
             Graphics::Recorder::CountBarriers(CommandClass::PresentBlit);
         }
     }
+#ifdef APS5_ENABLE_PROFILER
+    if (TelemetryEnabled_nid_no_patch()) {
+        const auto packets = PacketCounters::Sum();
+        const bool gpuTimed = PerformanceCounters::GpuEnabled();
+        const bool driverTimed = PerformanceCounters::DriverEnabled();
+        const Telemetry::Present present{
+            static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count()),
+            gpuTimed ? PerformanceCounters::GpuNanoseconds() : 0,
+            driverTimed ? PerformanceCounters::DriverNanoseconds() : 0,
+            packets.draws,
+            packets.dispatches,
+            (gpuTimed ? Telemetry::PresentGpuTimed : 0) | (driverTimed ? Telemetry::PresentDriverTimed : 0) | (clearOnly ? Telemetry::PresentClearOnly : 0)};
+        TelemetryNotePresent_nid_no_patch(&present);
+    }
+#endif
     if (overlay) {
         if (!state->overlay) state->overlay = std::make_unique<PerformanceOverlay>(graphicsContext(), state->presentSlots.size());
         state->overlay->NotePresent(std::chrono::steady_clock::now(), clearOnly ? VkExtent2D{} : VkExtent2D{width, height});

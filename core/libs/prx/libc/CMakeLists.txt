@@ -108,7 +108,9 @@ target_sources(libc PRIVATE
 )
 
 if(APS5_ENABLE_PROFILER)
-    target_sources(libc PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/specifics/x86_64/CallProfiler.cpp)
+    target_sources(libc PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/src/specifics/x86_64/CallProfiler.cpp
+            ${CMAKE_CURRENT_SOURCE_DIR}/src/specifics/x86_64/CallTelemetry.cpp)
     target_compile_definitions(libc PRIVATE APS5_ENABLE_PROFILER=1)
 endif()
 
@@ -810,6 +812,18 @@ if(BUILD_TESTING)
                     "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
             endif()
             set_tests_properties(guest_call_profile guest_call_profile_invalid guest_call_profile_default guest_call_profile_off PROPERTIES TIMEOUT 20)
+            add_test_executable(guest_telemetry_tests ${LIBS_INCLUDE_DIR}/tests/GuestTelemetry.cpp)
+            target_include_directories(guest_telemetry_tests PRIVATE ${LIBS_INCLUDE_DIR})
+            target_link_libraries(guest_telemetry_tests PRIVATE libc)
+            configure_windows_unwind(guest_telemetry_tests)
+            add_test(NAME guest_telemetry COMMAND guest_telemetry_tests)
+            add_test(NAME guest_telemetry_counts_only COMMAND guest_telemetry_tests counts-only)
+            add_test(NAME guest_telemetry_invalid_slow COMMAND guest_telemetry_tests invalid-slow)
+            set_tests_properties(guest_telemetry guest_telemetry_counts_only guest_telemetry_invalid_slow PROPERTIES TIMEOUT 20)
+            if(WIN32)
+                set_tests_properties(guest_telemetry guest_telemetry_counts_only guest_telemetry_invalid_slow PROPERTIES ENVIRONMENT_MODIFICATION
+                    "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
+            endif()
             set_tests_properties(guest_call_profile_abort PROPERTIES TIMEOUT 20 PASS_REGULAR_EXPRESSION
                 "most expensive traced imports \\(exclusive us, timed calls\\):[^~]* 1 libTraced.prx Nap")
         endif()

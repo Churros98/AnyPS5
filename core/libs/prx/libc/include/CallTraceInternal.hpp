@@ -33,6 +33,8 @@ bool CallProfileStart_nid_no_patch();
 bool CallProfileTimes_nid_no_patch(const char* name, const char* library);
 void CallProfileEnter_nid_no_patch();
 void CallProfileExit_nid_no_patch();
+std::uint64_t CallTelemetrySlowTicks_nid_no_patch(double nanosecondsPerTick);
+void CallTelemetryNoteSlow_nid_no_patch(std::size_t import, std::uint64_t ticks, std::uint64_t endTicks, std::uint64_t thread, std::uint64_t returnAddress);
 #endif
 }
 

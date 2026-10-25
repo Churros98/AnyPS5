@@ -2,6 +2,7 @@
 #include "prx/libc/include/CallProfile.hpp"
 #include "prx/libc/include/CallTraceInternal.hpp"
 #include "prx/libc/include/HostThreadSlot.hpp"
+#include "prx/libc/include/Telemetry.hpp"
 #include "prx/libc/include/general/AsmMacros.hpp"
 #include "prx/libc/include/general/VabiMacros.hpp"
 #include <x86intrin.h>
@@ -68,6 +69,9 @@ struct StatPage {
 
 struct ThreadStats {
     std::atomic<StatPage*> pages[MaxPages]{};
+    std::atomic<std::uint64_t> timedCalls{0};
+    std::atomic<std::uint64_t> topLevel{0};
+    std::uint64_t thread = 0;
     ThreadStats* next = nullptr;
 };
 
@@ -90,6 +94,7 @@ using ThreadSlot = HostThreadSlot<ThreadState*, ThreadStateTag>;
 
 std::atomic<ThreadStats*> g_threads{nullptr};
 std::uint64_t g_overhead = 0;
+std::uint64_t g_slowTicks = 0;
 std::uint64_t g_startTicks = 0;
 std::chrono::steady_clock::time_point g_startTime;
 CallTraceImportRecord g_calibration;
@@ -104,6 +109,7 @@ ThreadState* CurrentState() {
     ThreadState* state = ThreadSlot::Get();
     if (state != nullptr) return state;
     state = new ThreadState{};
+    state->stats.thread = CallTraceCurrentThread_nid_no_patch();
     ThreadSlot::Set(state);
     ThreadStats* head = g_threads.load(std::memory_order_relaxed);
     do {
@@ -255,6 +261,8 @@ std::uint64_t APS5_VABI CallProfileLeave_nid_no_patch(std::uint64_t stack) {
     }
     if (state->depth != 0) state->frames[state->depth - 1].children += raw;
     const std::uint64_t inclusive = raw > g_overhead ? raw - g_overhead : 0;
+    Add(state->stats.timedCalls, 1);
+    if (state->depth == 0) Add(state->stats.topLevel, inclusive);
     const std::uint64_t exclusive = inclusive > frame.children ? inclusive - frame.children : 0;
     std::size_t count = 0;
     const CallTraceImportRecord* records = CallTraceRecords_nid_no_patch(&count);
@@ -265,6 +273,7 @@ std::uint64_t APS5_VABI CallProfileLeave_nid_no_patch(std::uint64_t stack) {
     Add(stat.exclusive, exclusive);
     if (inclusive > stat.maximum.load(std::memory_order_relaxed)) stat.maximum.store(inclusive, std::memory_order_relaxed);
     Add(stat.histogram[Bucket(inclusive)], 1);
+    if (g_slowTicks != 0 && inclusive >= g_slowTicks) CallTelemetryNoteSlow_nid_no_patch(index, inclusive, now, state->stats.thread, frame.returnAddress);
     return frame.returnAddress;
 }
 
@@ -280,6 +289,7 @@ bool CallProfileStart_nid_no_patch() {
     Calibrate();
     const auto calibrated = std::chrono::steady_clock::now() - g_startTime;
     if (calibrated < MinimumCalibration) std::this_thread::sleep_for(MinimumCalibration - calibrated);
+    if (TelemetryEnabled_nid_no_patch()) g_slowTicks = CallTelemetrySlowTicks_nid_no_patch(CallProfileNanosecondsPerTick_nid_no_patch());
     if (interval) std::thread(Report, *interval).detach();
     return true;
 }
@@ -291,6 +301,15 @@ bool CallProfileTimes_nid_no_patch(const char* name, const char* library) {
     for (const std::string_view untimed : UntimedLibraries)
         if (owner.starts_with(untimed)) return false;
     return true;
+}
+
+std::size_t CopyCallProfileThreads_nid_no_patch(CallProfileThread* threads, std::size_t capacity) {
+    if (threads == nullptr) return 0;
+    std::size_t count = 0;
+    for (const ThreadStats* thread = g_threads.load(std::memory_order_acquire); thread != nullptr && count < capacity; thread = thread->next) {
+        threads[count++] = {thread->thread, thread->timedCalls.load(std::memory_order_relaxed), thread->topLevel.load(std::memory_order_relaxed)};
+    }
+    return count;
 }
 
 std::size_t CallProfileRecordCount_nid_no_patch() {

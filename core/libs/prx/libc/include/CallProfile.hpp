@@ -17,7 +17,14 @@ struct CallProfileEntry {
     std::uint64_t histogram[CallProfileHistogramBuckets];
 };
 
+struct CallProfileThread {
+    std::uint64_t thread;
+    std::uint64_t timedCalls;
+    std::uint64_t topLevelTicks;
+};
+
 extern "C" {
+std::size_t CopyCallProfileThreads_nid_no_patch(CallProfileThread* threads, std::size_t capacity);
 std::size_t CallProfileRecordCount_nid_no_patch();
 bool CallProfileReadRecord_nid_no_patch(std::size_t index, CallProfileEntry* entry);
 std::size_t CopyCallProfile_nid_no_patch(CallProfileEntry* entries, std::size_t capacity);

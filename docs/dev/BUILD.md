@@ -173,6 +173,16 @@ With `APS5_PROFILE_CALLS=<seconds>`, every `<seconds>` seconds a thread prints a
 
 `setjmp`, `_setjmp`, `sigsetjmp`, `longjmp`, `_longjmp`, `siglongjmp`, `getcontext`, `swapcontext`, `vfork`, `__cxa_throw`, `__cxa_rethrow`, the `_Unwind_*` entry points, `sceLibcBacktraceSelf`, `scePthreadExit`, `pthread_exit` and every `libSceFiber` import are counted but not timed, by name or NID. The limits are listed in the [libc](debt/libc.md) technical debt.
 
+### Telemetry
+
+With the flag, the first traced import or present makes libc create a shared memory block named `Local\AnyPS5-Telemetry-<pid>` on Windows and `/anyps5-telemetry-<pid>` (mode 0600, removed at exit) on Linux, and writes the block's name to `<temp>/anyps5-telemetry/<pid>` so that a monitor can find the process. The layout is [Telemetry.hpp](../../core/libs/prx/libc/include/Telemetry.hpp) (version 1) and [TelemetryReader.hpp](../../core/libs/prx/libc/include/TelemetryReader.hpp) reads it without locks:
+
+- Every present the agc driver appends its steady-clock time, the GPU and driver nanoseconds since start (zero unless `APS5_PROFILE_GPU` or `APS5_PROFILE_DRAW` is set, as the flags say), draws and dispatches since start to a ring of 1024 frames.
+- Every 100 ms a thread copies the call profile of up to 4096 imports and 256 threads (timed calls and the time of the calls made outside other traced calls), the profiler's rate and cost, and appends the traced calls made since the last copy to a ring of the 64 newest.
+- A timed call that takes at least `APS5_MONITOR_SLOW_US` microseconds (1 to 60,000,000; default 1000) is appended to a ring of 4096 slow calls with its import, thread, duration and caller.
+
+Each table entry and ring slot carries a sequence number that is odd while it is written; a reader copies an entry and keeps it when the number was even and unchanged. With `APS5_PROFILE_CALLS=0` only the presents and the call counts are published.
+
 ## Compute pipeline replay
 
 Build `agc_compute_pipeline_replay` in the full build with `-DANYPS5_ENABLE_SPIRV_TOOLS=ON`; replay validates the captured module before calling Vulkan. Set `APS5_DUMP_COMPUTE_PIPELINES` to a dedicated empty directory before starting a title to save each uncached compute pipeline's final SPIR-V, descriptor layouts, push constant ranges, specialization values, subgroup size and creation flags before compilation. Files are named `compute-<identity>/capture.aps5cp`; identical records are deduplicated. The pipelines of the start-up f32 denormal flush probe are not captured. Capture stops with an error at 128 records, 256 MiB total or 36 MiB per record (at most 8,388,608 SPIR-V words, or 32 MiB of shader code). Capture files contain shader code and device metadata, but no guest buffers or textures; review them before sharing.
