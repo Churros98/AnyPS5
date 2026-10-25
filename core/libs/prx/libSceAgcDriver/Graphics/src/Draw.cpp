@@ -1144,7 +1144,7 @@ const char* DrawRecipeMissName(DrawRecipeMiss miss) {
 }
 
 const char* DrawRecipeRefusalName(DrawRecipeRefusal refusal) {
-    constexpr std::array<const char*, DrawRecipeRefusalCount> names{"no key", "cpu indirect", "indirect", "patched", "disabled", "no stage", "stencil replay", "quad/strip", "proxied target", "not recorded", "transitions", "not cacheable", "waited", "indirect args", "not reusable", "moved", "multisampled", "reorders samples", "built"};
+    constexpr std::array<const char*, DrawRecipeRefusalCount> names{"no key", "cpu indirect", "indirect", "patched", "disabled", "no stage", "stencil replay", "quad/strip", "proxied target", "not recorded", "transitions", "not cacheable", "waited", "indirect args", "not reusable", "moved data", "moved address", "moved data and address", "multisampled", "reorders samples", "built"};
     return names[static_cast<std::size_t>(refusal)];
 }
 
@@ -1153,6 +1153,12 @@ namespace {
 std::array<std::atomic<std::uint64_t>, DrawRecipeRefusalCount>& DrawRecipeRefusals() {
     static std::array<std::atomic<std::uint64_t>, DrawRecipeRefusalCount> counters{};
     return counters;
+}
+
+DrawRecipeRefusal MovedRefusal(std::span<const ShaderResources::MovedBuffer> moved) {
+    const bool data = std::any_of(moved.begin(), moved.end(), [](const ShaderResources::MovedBuffer& buffer) { return !buffer.words.empty(); });
+    const bool address = std::any_of(moved.begin(), moved.end(), [](const ShaderResources::MovedBuffer& buffer) { return buffer.words.empty(); });
+    return data && address ? DrawRecipeRefusal::MovedBoth : data ? DrawRecipeRefusal::MovedData : DrawRecipeRefusal::MovedAddress;
 }
 
 void RefuseDrawRecipe(std::shared_ptr<const DrawRecipe>*& recipeOut, DrawRecipeRefusal refusal) {
@@ -2956,7 +2962,7 @@ void recordPreparedDraw(const Context& context, const State& state, const Pm4::D
         // only a template the resource cache serves under this content key (reusable: no lease,
         // no copied writes, every direct region import- or mirror-served) of a direct draw, so a
         // hit's proof is the template's ProveCurrent and nothing needs completion work.
-        const auto refusal = recipeOut == nullptr || !DrawRecipes() ? DrawRecipeRefusal::Count : !cacheable ? DrawRecipeRefusal::NotCacheable : outcome.waited ? DrawRecipeRefusal::Waited : args != nullptr ? DrawRecipeRefusal::IndirectArgs : !resources->Reusable() ? DrawRecipeRefusal::NotReusable : !resolved.moved.empty() ? DrawRecipeRefusal::Moved : multisampled ? DrawRecipeRefusal::Multisampled : pipeline->ReordersSamples() ? DrawRecipeRefusal::ReordersSamples : DrawRecipeRefusal::Built;
+        const auto refusal = recipeOut == nullptr || !DrawRecipes() ? DrawRecipeRefusal::Count : !cacheable ? DrawRecipeRefusal::NotCacheable : outcome.waited ? DrawRecipeRefusal::Waited : args != nullptr ? DrawRecipeRefusal::IndirectArgs : !resources->Reusable() ? DrawRecipeRefusal::NotReusable : !resolved.moved.empty() ? MovedRefusal(resolved.moved) : multisampled ? DrawRecipeRefusal::Multisampled : pipeline->ReordersSamples() ? DrawRecipeRefusal::ReordersSamples : DrawRecipeRefusal::Built;
         if (refusal != DrawRecipeRefusal::Count) CountDrawRecipeRefusal(refusal);
         if (refusal == DrawRecipeRefusal::Built) {
             auto recipe = std::make_shared<DrawRecipe>();
