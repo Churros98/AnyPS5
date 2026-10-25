@@ -40,6 +40,8 @@
 #include "Cover_frag_spv.h"
 #include "VertexRange_vert_spv.h"
 #include "VertexRangeProducer_frag_spv.h"
+#include "CoverBuffer_vert_spv.h"
+#include "CoverBuffer_frag_spv.h"
 #include "prx/libSceAgcDriver/Graphics/include/ColorTargetTransfer.hpp"
 #include "BdaAbi.hpp"
 #include "ShaderCacheSourceVersion.hpp"
@@ -10108,6 +10110,128 @@ bool vertexTargetRangeTests(const Device& device, Recorder& recorder, bool impor
     return true;
 }
 
+bool movedRecipeTests(const Device& device, Recorder& recorder) {
+    if (!device.Graphics() || device.GetContext().hostImportAlignment == 0) return false;
+    constexpr std::size_t unit = 65536;
+    constexpr std::size_t bytes = unit * 2;
+    void* block = AllocateWatched(bytes, unit);
+    if (block == nullptr) return false;
+    struct Release {
+        void* block;
+        ~Release() { ReleaseWatched(block, bytes); }
+    } release{block};
+    std::memset(block, 0, bytes);
+    const auto address = reinterpret_cast<std::uint64_t>(block);
+    const auto buffers = address + unit;
+    const std::array<std::uint32_t, 3> colors{0xff0000ffu, 0xff00ff00u, 0xffff0000u};
+    for (std::size_t i = 0; i < colors.size(); ++i) std::fill_n(reinterpret_cast<std::uint32_t*>(buffers + 4096 * i), 64, colors[i]);
+    struct Restore {
+        Recorder& recorder;
+        ~Restore() { recorder.Activate(); }
+    } restore{recorder};
+    auto context = device.GetContext();
+    DescriptorCache descriptors(context);
+    context.descriptorCache = &descriptors;
+    Recorder local(context);
+    local.Activate();
+    context.recorder = &local;
+    TextureDetiler detiler(context);
+    context.detiler = &detiler;
+    {
+        GuestAllocations::Mutation mutation;
+        mutation.Add(block, bytes, true, true, true);
+    }
+    struct Cleanup {
+        const Context& context;
+        Recorder& recorder;
+        void* block;
+        ~Cleanup() {
+            recorder.Sync();
+            WaitForOptimizedPipelines(context.device);
+            SharedResourceCache().Clear();
+            ClearCachedTextures(context.device);
+            recorder.Sync();
+            ClearCachedPipelines(context.device);
+            {
+                GuestAllocations::Mutation mutation;
+                mutation.Remove(block);
+            }
+            HostImportFor(context, reinterpret_cast<std::uint64_t>(block), bytes);
+        }
+    } cleanup{context, local, block};
+    if (HostImportFor(context, address, bytes) == nullptr) return false;
+    ShaderRecompiler::RecompileResult vertex;
+    vertex.spirv = std::vector<std::uint32_t>(std::begin(COVERBUFFER_VERT_SPV), std::end(COVERBUFFER_VERT_SPV));
+    vertex.variantId = 201;
+    ShaderRecompiler::RecompileResult pixel;
+    pixel.spirv = std::vector<std::uint32_t>(std::begin(COVERBUFFER_FRAG_SPV), std::end(COVERBUFFER_FRAG_SPV));
+    pixel.variantId = 202;
+    ShaderRecompiler::DescriptorBinding binding;
+    binding.kind = ShaderRecompiler::DescriptorKind::StorageBuffer;
+    binding.role = ShaderRecompiler::DescriptorRole::GuestBuffers;
+    binding.descriptorSet = ShaderRecompiler::RuntimeAbi::DescriptorSet;
+    binding.binding = 0;
+    binding.count = 1;
+    binding.bufferWritten = {false};
+    binding.bufferRead = {true};
+    binding.bufferAtomic = {false};
+    vertex.bindings.push_back(binding);
+    const std::array shaders{CompiledShader{ShaderRecompiler::ShaderStage::Vertex, &vertex, 0}, CompiledShader{ShaderRecompiler::ShaderStage::Fragment, &pixel, 0}};
+    State state{};
+    state.stages.path = ShaderPath::Vertex;
+    state.color = {address, {64, 64}, VK_FORMAT_R8G8B8A8_UNORM, unit, 0xe4u, ColorTileMode::RenderTarget, 4};
+    state.colors = {state.color};
+    state.hasColorTarget = true;
+    state.renderExtent = {64, 64};
+    state.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+    state.viewport = {0, 64, 64, -64, 0, 1};
+    state.scissor = {{0, 0}, {64, 64}};
+    state.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+    state.blend.colorWriteMask = 15;
+    state.blends = {state.blend};
+    const AgcDriver::Pm4::DrawParameters triangle{0, 3, 0, 1, 0, false};
+    const auto check = [&](std::size_t color, const char* what) {
+        std::vector<std::byte> texels(64 * 64 * 4);
+        ReadColorTarget(state.color, texels);
+        const auto expected = std::as_bytes(std::span(&colors[color], 1));
+        for (std::size_t texel = 0; texel < 64 * 64; ++texel) Require(std::equal(expected.begin(), expected.end(), texels.begin() + static_cast<std::ptrdiff_t>(texel * 4)), what);
+        std::vector<std::byte> cleared(64 * 64 * 4);
+        AgcDriver::GuestMemory::Write(address, cleared);
+    };
+    const auto bufferAt = [&](std::size_t color) {
+        const auto base = buffers + 4096 * color;
+        vertex.bindings[0].guestDescriptor = {static_cast<std::uint32_t>(base), static_cast<std::uint32_t>(base >> 32u) & 0xffffu, 256u, 0x31000000u};
+    };
+    bufferAt(0);
+    Draw(context, state, triangle, shaders);
+    WaitForOptimizedPipelines(context.device);
+    check(0, "the draw that built the template did not draw its buffer's color");
+    TakeDrawRecipeRefusals();
+    TakeMovedRecipeReplays();
+    bufferAt(1);
+    std::shared_ptr<const AgcDriver::DrawRecipe> recipe;
+    Draw(context, state, triangle, shaders, {}, &recipe);
+    WaitForOptimizedPipelines(context.device);
+    check(1, "the template hit whose read-only buffer moved did not draw the moved buffer's color");
+    Require(recipe != nullptr && TakeDrawRecipeRefusals()[static_cast<std::size_t>(DrawRecipeRefusal::Built)] == 1u, "a template hit whose read-only buffer moved built no draw recipe");
+    bufferAt(2);
+    const auto moved = DrawWithRecipe(context, state, triangle, shaders, {}, *recipe);
+    WaitForOptimizedPipelines(context.device);
+    Require(moved.recorded, std::string("a draw whose read-only buffer moved again did not replay its recipe: ") + DrawRecipeMissName(moved.miss));
+    Require(TakeMovedRecipeReplays() == 1u, "the recipe replay did not bind the moved read-only buffer");
+    check(2, "the recipe replay whose read-only buffer moved did not draw the moved buffer's color");
+    bufferAt(0);
+    const auto back = DrawWithRecipe(context, state, triangle, shaders, {}, *recipe);
+    WaitForOptimizedPipelines(context.device);
+    Require(back.recorded && TakeMovedRecipeReplays() == 0u, "a replay at the template's own buffer address bound a moved buffer");
+    check(0, "the recipe replay at the template's buffer address did not draw that buffer's color");
+    vertex.bindings[0].guestDescriptor = {0u, 0u, 0u, 0x31000000u};
+    const auto refused = DrawWithRecipe(context, state, triangle, shaders, {}, *recipe);
+    Require(!refused.recorded && refused.miss == DrawRecipeMiss::Moved, std::string("a replay whose read-only buffer emptied was not refused as moved: ") + DrawRecipeMissName(refused.miss));
+    std::cout << "Draw recipe moved buffer tests passed\n";
+    return true;
+}
+
 void pipelineCacheTests(const Device& device, bool benchmark) {
     std::thread establishThreadedProcess([] {});
     establishThreadedProcess.join();
@@ -11629,6 +11753,9 @@ int main(int argc, char** argv) {
 
         if (argc == 2 && (std::string_view(argv[1]) == "--vertex-target-range-copied" || std::string_view(argv[1]) == "--vertex-target-range-imported")) {
             return vertexTargetRangeTests(device, recorder, std::string_view(argv[1]) == "--vertex-target-range-imported") ? 0 : 77;
+        }
+        if (argc == 2 && std::string_view(argv[1]) == "--draw-recipe-moved") {
+            return movedRecipeTests(device, recorder) ? 0 : 77;
         }
 
 #ifdef _WIN32

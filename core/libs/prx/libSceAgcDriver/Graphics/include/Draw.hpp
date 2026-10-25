@@ -84,7 +84,7 @@ MeshArguments ResolveMeshArguments(const Pm4::DrawArguments& record, const MeshA
 // storage cache, the template is gone, the pipeline is gone from the pipeline store, or the
 // template's proof failed (ShaderResources::ProveCurrent; the template is removed from the
 // resource cache and kept by the batch).
-enum class DrawRecipeMiss : std::uint8_t { None, NotRecordable, TargetGone, TemplateGone, ObjectsGone, Proof, Count };
+enum class DrawRecipeMiss : std::uint8_t { None, NotRecordable, TargetGone, TemplateGone, ObjectsGone, Proof, Moved, Count };
 const char* DrawRecipeMissName(DrawRecipeMiss miss);
 struct DrawRecipeOutcome {
     bool recorded = false;
@@ -103,11 +103,12 @@ struct DrawRecipeOutcome {
 DrawRecipeOutcome DrawWithRecipe(const Context& context, const State& state, const Pm4::DrawParameters& draw, std::span<const CompiledShader> shaders, std::span<const GuestMemorySnapshot> snapshots, const DrawRecipe& recipe, const DrawTraceContext* trace = nullptr);
 // Whether recorded draws build recipes and draw-cache hits use them (APS5_NO_DRAW_RECIPE unset).
 bool DrawRecipes();
-enum class DrawRecipeRefusal : std::uint8_t { NoKey, CpuIndirect, Indirect, Patched, Disabled, NoStage, StencilReplay, QuadOrStrip, ProxiedTarget, NotRecorded, Transitions, NotCacheable, Waited, IndirectArgs, NotReusable, MovedData, MovedAddress, MovedBoth, Multisampled, ReordersSamples, Built, Count };
+enum class DrawRecipeRefusal : std::uint8_t { NoKey, CpuIndirect, Indirect, Patched, Disabled, NoStage, StencilReplay, QuadOrStrip, ProxiedTarget, NotRecorded, Transitions, NotCacheable, Waited, IndirectArgs, NotReusable, Multisampled, ReordersSamples, Built, Count };
 constexpr std::size_t DrawRecipeRefusalCount = static_cast<std::size_t>(DrawRecipeRefusal::Count);
 const char* DrawRecipeRefusalName(DrawRecipeRefusal refusal);
 void CountDrawRecipeRefusal(DrawRecipeRefusal refusal);
 std::array<std::uint64_t, DrawRecipeRefusalCount> TakeDrawRecipeRefusals();
+std::uint64_t TakeMovedRecipeReplays();
 
 // How an indirect draw's records were read, for the [draws] line (APS5_PROFILE_DRAW): Gpu is
 // vkCmdDrawIndirect from the host import; every other value names why the CPU read them instead,

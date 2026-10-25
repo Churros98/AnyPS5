@@ -4367,11 +4367,11 @@ DispatchCounters& Dispatches() {
 
 // The [recipe] line (APS5_PROFILE_DRAW, every 10 s), dispatch and indirect rows apart. The
 // pre-check runs without the mutex, so the counters are atomic.
-enum RecipeMiss : std::size_t { MissNoRecipe, MissDevice, MissTemplateGone, MissObjectsGone, MissNotRecordable, RecipeMissCount };
-constexpr std::array<const char*, RecipeMissCount> RecipeMissNames{"no recipe", "device", "template gone", "objects gone", "not recordable"};
+enum RecipeMiss : std::size_t { MissNoRecipe, MissDevice, MissTemplateGone, MissObjectsGone, MissNotRecordable, MissMoved, RecipeMissCount };
+constexpr std::array<const char*, RecipeMissCount> RecipeMissNames{"no recipe", "device", "template gone", "objects gone", "not recordable", "moved refused"};
 // The draw rows name the miss reasons of DrawWithRecipe (a target or a pipeline gone is the
 // objects-gone slot).
-constexpr std::array<const char*, RecipeMissCount> DrawRecipeMissNames{"no recipe", "device", "template gone", "targets gone", "not recordable"};
+constexpr std::array<const char*, RecipeMissCount> DrawRecipeMissNames{"no recipe", "device", "template gone", "targets gone", "not recordable", "moved refused"};
 constexpr std::array<const char*, static_cast<std::size_t>(Graphics::ShaderResources::ProofPath::Count)> ProofPathNames{"fast", "T1 refreshed", "full"};
 constexpr std::array<const char*, static_cast<std::size_t>(Graphics::ShaderResources::ProofFailure::Count)> ProofFailureNames{"none", "imports", "evicted", "pending", "changed", "keys", "other"};
 
@@ -4457,13 +4457,13 @@ std::string DrawRecipeRefusalText(const std::array<std::uint64_t, Graphics::Draw
     constexpr auto firstBuild = static_cast<std::size_t>(Graphics::DrawRecipeRefusal::StencilReplay);
     constexpr auto built = static_cast<std::size_t>(Graphics::DrawRecipeRefusal::Built);
     std::string text = "; not requested: ";
-    char item[64];
+    char item[96];
     for (std::size_t i = 0; i < built; ++i) {
         if (i == firstBuild) text += "; not built: ";
         std::snprintf(item, sizeof(item), "%s%s %llu", i == 0 || i == firstBuild ? "" : ", ", Graphics::DrawRecipeRefusalName(static_cast<Graphics::DrawRecipeRefusal>(i)), static_cast<unsigned long long>(counts[i]));
         text += item;
     }
-    std::snprintf(item, sizeof(item), "; built %llu", static_cast<unsigned long long>(counts[built]));
+    std::snprintf(item, sizeof(item), "; built %llu; replayed with moved buffers %llu", static_cast<unsigned long long>(counts[built]), static_cast<unsigned long long>(Graphics::TakeMovedRecipeReplays()));
     return text + item;
 }
 
@@ -4704,6 +4704,7 @@ RecipeOutcome VulkanDevice::DrawFromRecipe(const Graphics::State& graphics, cons
             case Graphics::DrawRecipeMiss::TargetGone:
             case Graphics::DrawRecipeMiss::ObjectsGone: counters.precheckMisses[MissObjectsGone].fetch_add(1, std::memory_order_relaxed); break;
             case Graphics::DrawRecipeMiss::TemplateGone: counters.precheckMisses[MissTemplateGone].fetch_add(1, std::memory_order_relaxed); break;
+            case Graphics::DrawRecipeMiss::Moved: counters.precheckMisses[MissMoved].fetch_add(1, std::memory_order_relaxed); break;
             case Graphics::DrawRecipeMiss::Proof: counters.rebuilds[static_cast<std::size_t>(outcome.proof.failure)].fetch_add(1, std::memory_order_relaxed); break;
             default: break;
         }
