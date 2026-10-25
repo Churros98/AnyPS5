@@ -8,7 +8,7 @@
 namespace Telemetry {
 
 constexpr std::uint64_t Magic = 0x4d4c5435535041ull;
-constexpr std::uint32_t Version = 2;
+constexpr std::uint32_t Version = 3;
 constexpr std::size_t FrameCapacity = 1024;
 constexpr std::size_t ImportCapacity = 4096;
 constexpr std::size_t ThreadCapacity = 256;
@@ -24,6 +24,9 @@ constexpr std::size_t WatchedArguments = 6;
 constexpr std::size_t PhaseCapacity = 512;
 constexpr std::size_t PhaseThreadBytes = 32;
 constexpr std::size_t PhaseNameBytes = 64;
+constexpr std::size_t ReportCapacity = 64;
+constexpr std::size_t ReportTagBytes = 48;
+constexpr std::size_t ReportBytes = 2048;
 
 enum class CommandKind : std::uint64_t { WatchImport = 1, SetSlowThreshold = 2, SampleStacks = 3 };
 enum class CommandStatus : std::uint64_t { Done = 1, Failed = 2 };
@@ -51,6 +54,7 @@ struct Header {
     std::uint64_t watchedWritten;
     std::uint64_t phases;
     std::uint64_t phasesPublishes;
+    std::uint64_t reports;
 };
 
 struct Frame {
@@ -131,6 +135,14 @@ struct Phase {
     char name[PhaseNameBytes];
 };
 
+struct Report {
+    std::uint64_t sequence;
+    std::uint64_t nanoseconds;
+    std::uint64_t updates;
+    char tag[ReportTagBytes];
+    char text[ReportBytes];
+};
+
 struct Block {
     Header header;
     Frame frames[FrameCapacity];
@@ -142,6 +154,7 @@ struct Block {
     Response responses[CommandCapacity];
     WatchedCall watched[WatchedCapacity];
     Phase phases[PhaseCapacity];
+    Report reports[ReportCapacity];
 };
 
 static_assert(std::is_standard_layout_v<Block> && std::is_trivially_copyable_v<Block>);
@@ -173,6 +186,7 @@ bool TelemetryEnabled_nid_no_patch();
 void TelemetryNotePresent_nid_no_patch(const Telemetry::Present* present);
 void TelemetryPublishPhases_nid_no_patch(const Telemetry::PhaseTotal* totals, std::size_t count);
 void TelemetryRegisterStackSampler_nid_no_patch(Telemetry::StackSampler sampler);
+void TelemetryPublishReport_nid_no_patch(const char* text);
 }
 
 #endif

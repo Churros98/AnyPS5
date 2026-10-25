@@ -41,6 +41,7 @@ private:
     Json watchImport(const Json& arguments);
     Json watchedCalls(const Json& arguments);
     Json driverPhases(const Json& arguments);
+    Json driverReport(const Json& arguments);
     Json setSlowThreshold(const Json& arguments);
     Json saveSnapshot(const Json& arguments);
     Json listSnapshots();

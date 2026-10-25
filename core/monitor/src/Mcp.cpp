@@ -32,7 +32,8 @@ constexpr const char* Instructions =
     "unset or above 0, GPU time needs APS5_PROFILE_GPU=1 and agc driver time APS5_PROFILE_DRAW=1. "
     "Start with get_summary, then get_imports and get_slow_calls to find what fills the frame. When the time is not in imports, "
     "sample_stacks shows the hottest game and library functions. watch_import records the arguments of a suspicious import, "
-    "get_driver_phases splits the agc driver time (needs APS5_TRACE_SUMMARY_EVERY), resolve_address names callers, and "
+    "get_driver_phases splits the agc driver time (needs APS5_TRACE_SUMMARY_EVERY), get_driver_report reads the agc driver's "
+    "[recipe], [draws] and other report lines (needs APS5_PROFILE_DRAW), resolve_address names callers, and "
     "save_snapshot with compare_snapshots measures a change between two runs. Memory tools only read. Import names are NIDs "
     "when the monitor finds no NID database.";
 
@@ -127,6 +128,8 @@ Json ToolList() {
         Json::Object({{"since", Property("integer", "next_since of the previous call, default 0")}, {"limit", Property("integer", "calls to return, default 50")}, {"filter", Property("string", "part of the import name")}})));
     tools.Push(Tool("get_driver_phases", "agc driver PerformanceTimer scopes per thread with milliseconds per second and mean duration; needs APS5_TRACE_SUMMARY_EVERY.",
         Json::Object({{"limit", Property("integer", "rows, default 30")}, {"filter", Property("string", "part of the thread or scope name")}})));
+    tools.Push(Tool("get_driver_report", "Latest line of each agc driver report ([recipe] draw, [draws], [pipecache] and others), one per tag, with its age; most print every 10 s with APS5_PROFILE_DRAW=1.",
+        Json::Object({{"filter", Property("string", "part of the tag or of the line")}, {"limit", Property("integer", "rows, default 64")}})));
     tools.Push(Tool("set_slow_threshold", "Change the duration from which timed calls are published as slow calls.", Json::Object({{"microseconds", Property("integer", "1 to 60000000")}})));
     tools.Push(Tool("save_snapshot", "Store the current summary, import, thread and driver phase rates under a name, to compare runs before and after a change.",
         Json::Object({{"name", Property("string", "letters, digits, '-', '_' or '.'")}, {"note", Property("string", "what the run is, such as the commit or the switches")}})));
@@ -272,6 +275,7 @@ Json McpServer::callTool(const std::string& name, const Json& arguments) {
     if (name == "list_modules") return listModules(arguments);
     if (name == "get_watched_calls") return watchedCalls(arguments);
     if (name == "get_driver_phases") return driverPhases(arguments);
+    if (name == "get_driver_report") return driverReport(arguments);
     if (name == "save_snapshot") return saveSnapshot(arguments);
     if (name == "list_memory_regions") return memoryRegions(arguments);
     if (name == "read_memory") return readMemory(arguments);
@@ -671,6 +675,22 @@ Json McpServer::driverPhases(const Json& arguments) {
     }
     Json result = Json::Object({{"window_seconds", _session.WindowSeconds()}, {"phases", std::move(list)}});
     if (_session.Phases().empty()) result.Set("note", "no driver phases: run the title with APS5_TRACE_SUMMARY_EVERY=<seconds> so that the agc driver keeps its PerformanceTimer totals");
+    return result;
+}
+
+Json McpServer::driverReport(const Json& arguments) {
+    const auto limit = static_cast<std::size_t>(Number(arguments, "limit", 64, 1, Telemetry::ReportCapacity));
+    const std::string filter = Text(arguments, "filter", "");
+    ensureConnected();
+    _session.Poll();
+    Json list = Json::Array();
+    for (const DriverReport& report : _session.Reports()) {
+        if (list.Items().size() >= limit) break;
+        if (!Matches(filter, {report.tag, report.text})) continue;
+        list.Push(Json::Object({{"tag", report.tag}, {"line", report.text}, {"age_s", report.ageSeconds}, {"updates", report.updates}}));
+    }
+    Json result = Json::Object({{"reports", std::move(list)}});
+    if (_session.Reports().empty()) result.Set("note", "no driver reports yet: run the title with APS5_PROFILE_DRAW=1; most lines print every 10 s");
     return result;
 }
 

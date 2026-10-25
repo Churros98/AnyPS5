@@ -15,6 +15,7 @@
 #include <cstdint>
 #include <cstring>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace Telemetry {
@@ -33,6 +34,32 @@ inline std::string MappingName(std::uint64_t pid) {
 #else
     return "/anyps5-telemetry-" + std::to_string(pid);
 #endif
+}
+
+inline std::string ReportTag(std::string_view text) {
+    if (text.empty() || text.front() != '[') return {};
+    std::string tag;
+    std::size_t words = 0;
+    bool digits = false;
+    for (std::size_t index = 0; index < text.size() && tag.size() + 1 < ReportTagBytes; ++index) {
+        const char character = text[index];
+        if (character == ':' || character == '\n' || (character == '(' && index != 0)) break;
+        if (character == ' ') {
+            if (++words == 3) break;
+            digits = false;
+            tag += ' ';
+            continue;
+        }
+        if (character >= '0' && character <= '9') {
+            if (!digits) tag += '#';
+            digits = true;
+            continue;
+        }
+        digits = false;
+        tag += character;
+    }
+    while (!tag.empty() && (tag.back() == ' ' || tag.back() == ',' || tag.back() == ';')) tag.pop_back();
+    return tag;
 }
 
 template <typename TEntry>
@@ -136,6 +163,7 @@ public:
         header.watchedWritten = Load(source.watchedWritten);
         header.phases = Load(source.phases);
         header.phasesPublishes = Load(source.phasesPublishes);
+        header.reports = Load(source.reports);
         return header;
     }
 
@@ -174,6 +202,16 @@ public:
             if (ReadEntry(_block->phases[index], entry)) phases.push_back(entry);
         }
         return phases;
+    }
+
+    std::vector<Report> ReadReports() const {
+        std::vector<Report> reports;
+        const std::uint64_t count = std::min<std::uint64_t>(Load(_block->header.reports), ReportCapacity);
+        for (std::uint64_t index = 0; index < count; ++index) {
+            Report entry{};
+            if (ReadEntry(_block->reports[index], entry)) reports.push_back(entry);
+        }
+        return reports;
     }
 
     std::vector<Frame> ReadFrames(std::uint64_t after = 0) const {

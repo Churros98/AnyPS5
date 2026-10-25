@@ -89,6 +89,8 @@ void Session::Disconnect() {
     _importNames.clear();
     _watched.clear();
     _phases.clear();
+    _reports.clear();
+    _reportsRead = {};
     _lastFrame = _lastPresent = _lastGpu = _lastDriver = _lastDraws = _lastDispatches = _lastSlow = _lastWatched = 0;
 }
 
@@ -193,6 +195,20 @@ void Session::Poll() {
         _lastDriver = frame.driverNanoseconds;
         _lastDraws = frame.draws;
         _lastDispatches = frame.dispatches;
+    }
+    if (now - _reportsRead >= std::chrono::milliseconds(250)) {
+        _reportsRead = now;
+        _reports.clear();
+        const auto nowNs = static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(now.time_since_epoch()).count());
+        for (const Telemetry::Report& report : _reader.ReadReports()) {
+            DriverReport view;
+            view.tag = std::string(report.tag, std::find(report.tag, report.tag + sizeof(report.tag), '\0'));
+            view.text = std::string(report.text, std::find(report.text, report.text + sizeof(report.text), '\0'));
+            view.ageSeconds = nowNs > report.nanoseconds ? static_cast<double>(nowNs - report.nanoseconds) / 1e9 : 0;
+            view.updates = report.updates;
+            _reports.push_back(std::move(view));
+        }
+        std::sort(_reports.begin(), _reports.end(), [](const DriverReport& left, const DriverReport& right) { return left.tag < right.tag; });
     }
     for (const Telemetry::WatchedCall& call : _reader.ReadWatchedCalls(_lastWatched)) {
         _lastWatched = call.sequence / 2;
@@ -349,6 +365,10 @@ const std::deque<WatchedCallView>& Session::WatchedCalls() const {
 
 const std::vector<PhaseRate>& Session::Phases() const {
     return _phases;
+}
+
+const std::vector<DriverReport>& Session::Reports() const {
+    return _reports;
 }
 
 FrameSummary Session::Summarize(double seconds) const {

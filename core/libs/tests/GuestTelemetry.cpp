@@ -162,6 +162,31 @@ int main(int argc, char** argv) {
     const auto recent = reader.ReadRecentCalls();
     Require(recent.size() == 64 && std::strcmp(recent.back().name, "Nap") == 0 && recent.back().thread == CurrentThread());
 
+    Require(Telemetry::ReportTag("[recipe] draw (10 s): hits 3") == "[recipe] draw");
+    Require(Telemetry::ReportTag("[buffers] 12 uploads: import lookup 0.5") == "[buffers] # uploads");
+    Require(Telemetry::ReportTag("[rescache] (cumulative): 4 hits") == "[rescache]");
+    Require(Telemetry::ReportTag("[guestmem]\n") == "[guestmem]");
+    Require(Telemetry::ReportTag("[dispatch] 16000 dispatches, phase totals: reap=0s") == "[dispatch] # dispatches");
+    Require(Telemetry::ReportTag("Graphics.Draw 12 us").empty());
+    TelemetryPublishReport_nid_no_patch("[recipe] draw (10 s): hits 1\n");
+    TelemetryPublishReport_nid_no_patch("not a report line\n");
+    TelemetryPublishReport_nid_no_patch("[buffers] 12 uploads: first\n");
+    TelemetryPublishReport_nid_no_patch("[recipe] draw (10 s): hits 2\n");
+    TelemetryPublishReport_nid_no_patch("[buffers] 7 uploads: second\n");
+    auto reports = reader.ReadReports();
+    Require(reports.size() == 2 && reader.ReadHeader().reports == 2);
+    Require(std::strcmp(reports[0].tag, "[recipe] draw") == 0 && std::strcmp(reports[0].text, "[recipe] draw (10 s): hits 2") == 0 && reports[0].updates == 2);
+    Require(std::strcmp(reports[1].tag, "[buffers] # uploads") == 0 && std::strcmp(reports[1].text, "[buffers] 7 uploads: second") == 0 && reports[1].updates == 2);
+    Require(reports[1].nanoseconds >= reports[0].nanoseconds);
+    for (std::size_t index = 0; index < Telemetry::ReportCapacity; ++index) {
+        const std::string line = "[fill" + std::string(1, static_cast<char>('a' + index % 26)) + std::string(1, static_cast<char>('a' + index / 26)) + "] line";
+        TelemetryPublishReport_nid_no_patch(line.c_str());
+    }
+    reports = reader.ReadReports();
+    Require(reports.size() == Telemetry::ReportCapacity);
+    Require(std::none_of(reports.begin(), reports.end(), [](const Telemetry::Report& report) { return std::strcmp(report.tag, "[recipe] draw") == 0 || std::strcmp(report.tag, "[buffers] # uploads") == 0; }));
+    Require(std::any_of(reports.begin(), reports.end(), [](const Telemetry::Report& report) { return std::strcmp(report.tag, "[fillbc] line") == 0; }));
+
     const auto discovery = std::filesystem::temp_directory_path() / "anyps5-telemetry" / std::to_string(ProcessId());
     Require(std::filesystem::exists(discovery));
 

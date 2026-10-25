@@ -14,6 +14,9 @@
 #include <thread>
 #include <utility>
 #include <vector>
+#ifdef APS5_ENABLE_PROFILER
+#include "prx/libc/include/Telemetry.hpp"
+#endif
 
 namespace AgcDriver {
 
@@ -156,6 +159,12 @@ inline void StopProfileOutput_nid_no_patch() {
 
 template<typename... TArgs>
 void ProfilePrint_nid_no_patch(const char* format, TArgs... args) {
+#ifdef APS5_ENABLE_PROFILER
+    if ((format[0] == '[' || format[0] == '%') && TelemetryEnabled_nid_no_patch()) {
+        std::array<char, Telemetry::ReportBytes> line{};
+        if (std::snprintf(line.data(), line.size(), format, args...) > 0) TelemetryPublishReport_nid_no_patch(line.data());
+    }
+#endif
     ProfileOutput_nid_no_patch().Print(format, args...);
 }
 

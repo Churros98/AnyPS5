@@ -40,6 +40,7 @@ std::filesystem::path g_discovery;
 std::atomic<Telemetry::StackSampler> g_sampler{nullptr};
 std::atomic<bool> g_sampling{false};
 std::mutex g_phaseMutex;
+std::mutex g_reportMutex;
 
 std::uint64_t ProcessId() {
 #ifdef _WIN32
@@ -309,6 +310,39 @@ void TelemetryPublishPhases_nid_no_patch(const Telemetry::PhaseTotal* totals, st
     }
     Telemetry::Store(g_block->header.phases, published);
     Telemetry::Store(g_block->header.phasesPublishes, Telemetry::Load(g_block->header.phasesPublishes) + 1);
+}
+
+void TelemetryPublishReport_nid_no_patch(const char* text) {
+    if (text == nullptr || !TelemetryEnabled_nid_no_patch()) return;
+    const std::string tag = Telemetry::ReportTag(text);
+    if (tag.empty()) return;
+    std::string line(text);
+    while (!line.empty() && (line.back() == '\n' || line.back() == '\r')) line.pop_back();
+    const auto now = static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());
+    std::scoped_lock lock(g_reportMutex);
+    const std::uint64_t used = Telemetry::Load(g_block->header.reports);
+    std::size_t slot = used;
+    for (std::size_t index = 0; index < used; ++index) {
+        if (std::strncmp(g_block->reports[index].tag, tag.c_str(), Telemetry::ReportTagBytes) == 0) {
+            slot = index;
+            break;
+        }
+    }
+    if (slot == Telemetry::ReportCapacity) {
+        slot = 0;
+        for (std::size_t index = 1; index < Telemetry::ReportCapacity; ++index) {
+            if (g_block->reports[index].nanoseconds < g_block->reports[slot].nanoseconds) slot = index;
+        }
+    }
+    const bool same = slot < used && std::strncmp(g_block->reports[slot].tag, tag.c_str(), Telemetry::ReportTagBytes) == 0;
+    const std::uint64_t updates = same ? g_block->reports[slot].updates + 1 : 1;
+    PublishEntry(g_block->reports[slot], [&](Telemetry::Report& target) {
+        target.nanoseconds = now;
+        target.updates = updates;
+        CopyName(target.tag, sizeof(target.tag), tag.c_str());
+        CopyName(target.text, sizeof(target.text), line.c_str());
+    });
+    if (slot == used) Telemetry::Store(g_block->header.reports, used + 1);
 }
 
 void CallTelemetryNoteWatched_nid_no_patch(std::size_t import, std::uint64_t thread, const std::uint64_t* arguments, std::uint64_t result, std::uint64_t ticks, std::uint64_t returnAddress) {

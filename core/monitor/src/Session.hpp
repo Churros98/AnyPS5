@@ -94,6 +94,13 @@ struct PhaseRate {
     double averageUs = 0;
 };
 
+struct DriverReport {
+    std::string tag;
+    std::string text;
+    double ageSeconds = 0;
+    std::uint64_t updates = 0;
+};
+
 struct CommandResult {
     bool done = false;
     std::uint64_t value = 0;
@@ -134,6 +141,7 @@ public:
     std::optional<std::size_t> FindImport(const std::string& name) const;
     const std::deque<WatchedCallView>& WatchedCalls() const;
     const std::vector<PhaseRate>& Phases() const;
+    const std::vector<DriverReport>& Reports() const;
 
 private:
     struct Snapshot {
@@ -167,6 +175,8 @@ private:
     std::deque<WatchedCallView> _watched;
     std::uint64_t _lastWatched = 0;
     std::vector<PhaseRate> _phases;
+    std::vector<DriverReport> _reports;
+    Clock::time_point _reportsRead{};
     std::vector<std::string> _importNames;
     std::unordered_map<std::string, std::string> _names;
     mutable ThreadNames _threadNames;

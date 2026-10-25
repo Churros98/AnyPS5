@@ -1,6 +1,7 @@
 #include "Monitor.hpp"
 #include "imgui.h"
 #include <algorithm>
+#include <array>
 #include <cctype>
 #include <cfloat>
 #include <cstdio>
@@ -290,6 +291,37 @@ void DrawRecentCalls(Session& session) {
     ImGui::EndTable();
 }
 
+void DrawDriver(Session& session) {
+    static std::array<char, 64> filter{};
+    ImGui::SetNextItemWidth(240);
+    ImGui::InputTextWithHint("##driver-filter", "filter", filter.data(), filter.size());
+    const auto& reports = session.Reports();
+    if (reports.empty()) {
+        ImGui::TextDisabled("No driver reports yet: run the title with APS5_PROFILE_DRAW=1; most lines print every 10 s.");
+        return;
+    }
+    const std::string needle(filter.data());
+    if (!ImGui::BeginTable("driver", 3, ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerV | ImGuiTableFlags_ScrollY)) return;
+    ImGui::TableSetupScrollFreeze(0, 1);
+    ImGui::TableSetupColumn("report");
+    ImGui::TableSetupColumn("age");
+    ImGui::TableSetupColumn("line", ImGuiTableColumnFlags_WidthStretch);
+    ImGui::TableHeadersRow();
+    for (const DriverReport& report : reports) {
+        if (!needle.empty() && report.tag.find(needle) == std::string::npos && report.text.find(needle) == std::string::npos) continue;
+        ImGui::TableNextRow();
+        ImGui::TableNextColumn();
+        ImGui::TextUnformatted(report.tag.c_str());
+        ImGui::TableNextColumn();
+        ImGui::Text("%.0f s", report.ageSeconds);
+        ImGui::TableNextColumn();
+        ImGui::PushTextWrapPos(0.0f);
+        ImGui::TextUnformatted(report.text.c_str());
+        ImGui::PopTextWrapPos();
+    }
+    ImGui::EndTable();
+}
+
 }
 
 void DrawMonitor(Session& session) {
@@ -322,6 +354,10 @@ void DrawMonitor(Session& session) {
         }
         if (ImGui::BeginTabItem("Last calls")) {
             DrawRecentCalls(session);
+            ImGui::EndTabItem();
+        }
+        if (ImGui::BeginTabItem("Driver")) {
+            DrawDriver(session);
             ImGui::EndTabItem();
         }
         ImGui::EndTabBar();

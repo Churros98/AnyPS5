@@ -202,7 +202,7 @@ static void CheckServer(Monitor::McpServer& server) {
         Require(!tool.Find("description")->AsString().empty() && tool.Find("inputSchema")->Find("type")->AsString() == "object");
     }
     Require(names == std::vector<std::string>{"list_processes", "connect", "get_summary", "get_imports", "get_threads", "get_slow_calls", "get_frames", "get_recent_calls", "sample", "resolve_address",
-        "list_modules", "sample_stacks", "watch_import", "get_watched_calls", "get_driver_phases", "set_slow_threshold", "save_snapshot", "list_snapshots", "compare_snapshots", "list_memory_regions",
+        "list_modules", "sample_stacks", "watch_import", "get_watched_calls", "get_driver_phases", "get_driver_report", "set_slow_threshold", "save_snapshot", "list_snapshots", "compare_snapshots", "list_memory_regions",
         "read_memory", "search_memory"});
 
     const Json parseError = Json::Parse(server.Handle("{oops"));
@@ -388,6 +388,17 @@ static void CheckAgentTools(Monitor::McpServer& server) {
     Require(Tool(server, 64, "get_driver_phases", Json::Object({{"filter", "monitor mcp"}})).Find("structuredContent")->Find("phases")->Items().size() == 1);
     Require(packet.Find("ms_per_s")->AsNumber() > 100 && packet.Find("average_us")->AsNumber() > 2999 && packet.Find("average_us")->AsNumber() < 3001);
 
+    const Json noReports = *Tool(server, 90, "get_driver_report").Find("structuredContent");
+    Require(noReports.Find("reports")->Items().empty() && HasText(noReports, "note", "APS5_PROFILE_DRAW"));
+    TelemetryPublishReport_nid_no_patch("[recipe] draw (10 s): hits 7; attaches 3");
+    TelemetryPublishReport_nid_no_patch("[draws] 5 draws");
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    const Json reports = *Tool(server, 91, "get_driver_report", Json::Object({{"filter", "recipe"}})).Find("structuredContent");
+    Require(reports.Find("reports")->Items().size() == 1);
+    const Json& recipe = reports.Find("reports")->Items()[0];
+    Require(recipe.Find("tag")->AsString() == "[recipe] draw" && recipe.Find("line")->AsString() == "[recipe] draw (10 s): hits 7; attaches 3" && recipe.Find("updates")->AsNumber() == 1 && recipe.Find("age_s")->AsNumber() < 5);
+    Require(Tool(server, 92, "get_driver_report").Find("structuredContent")->Find("reports")->Items().size() == 2);
+
     const Json threshold = *Tool(server, 46, "set_slow_threshold", Json::Object({{"microseconds", 5000}})).Find("structuredContent");
     Require(threshold.Find("threshold_us")->AsNumber() == 5000 && threshold.Find("threshold_ticks")->AsNumber() > 0);
     const double slowUs = Tool(server, 47, "get_slow_calls").Find("structuredContent")->Find("threshold_us")->AsNumber();
@@ -507,7 +518,7 @@ int main(int argc, char** argv) {
     std::istringstream lines(out.str());
     std::vector<std::string> responses;
     for (std::string line; std::getline(lines, line);) responses.push_back(line);
-    Require(responses.size() == 2 && Json::Parse(responses[0]).Find("id")->AsNumber() == 1 && Json::Parse(responses[1]).Find("result")->Find("tools")->Items().size() == 22);
+    Require(responses.size() == 2 && Json::Parse(responses[0]).Find("id")->AsNumber() == 1 && Json::Parse(responses[1]).Find("result")->Find("tools")->Items().size() == 23);
 
     if (argc == 2) CheckProcess(argv[1]);
     running = false;
