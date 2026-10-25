@@ -1103,6 +1103,7 @@ DrawVerdict Driver::finishDraw(DrawTail& tail, PerformanceTimer& timing) {
         std::vector<Pm4::DrawArguments> records;
         for (std::uint32_t record = 0; record < count; ++record) records.push_back(Pm4::ReadDrawArguments(indirect, record));
         Graphics::CountIndirectDraw(*indirectCpu, std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - readStart).count());
+        Graphics::CountDrawRecipeRefusal(Graphics::DrawRecipeRefusal::CpuIndirect);
         const auto baseVertexWords = UserDataWords(programs, roles, indirect.baseVertexLocation);
         const auto startInstanceWords = UserDataWords(programs, roles, indirect.startInstanceLocation);
         const auto drawIndexWords = indirect.drawIndexEnabled ? UserDataWords(programs, roles, indirect.drawIndexLocation) : std::vector<std::pair<std::size_t, std::size_t>>{};
@@ -1197,8 +1198,11 @@ DrawVerdict Driver::finishDraw(DrawTail& tail, PerformanceTimer& timing) {
     if (registerKey && !drawParameters.indirect && !patchedStages && Graphics::DrawRecipes()) {
         recipeStages.reserve(programs.size());
         for (std::size_t i = 0; i < programs.size(); ++i) recipeStages.push_back(drawHit ? matched[i] : fresh[i]);
-        if (std::all_of(recipeStages.begin(), recipeStages.end(), [](const std::shared_ptr<DispatchVariant>& variant) { return variant == nullptr; })) recipeStages.clear();
-    }
+        if (std::all_of(recipeStages.begin(), recipeStages.end(), [](const std::shared_ptr<DispatchVariant>& variant) { return variant == nullptr; })) {
+            recipeStages.clear();
+            Graphics::CountDrawRecipeRefusal(Graphics::DrawRecipeRefusal::NoStage);
+        }
+    } else Graphics::CountDrawRecipeRefusal(!registerKey ? Graphics::DrawRecipeRefusal::NoKey : drawParameters.indirect ? Graphics::DrawRecipeRefusal::Indirect : patchedStages ? Graphics::DrawRecipeRefusal::Patched : Graphics::DrawRecipeRefusal::Disabled);
     std::shared_ptr<const DrawRecipe> recipe;
     if (drawHit && !recipeStages.empty()) {
         recipe = findDrawRecipe(drawKey, recipeStages);

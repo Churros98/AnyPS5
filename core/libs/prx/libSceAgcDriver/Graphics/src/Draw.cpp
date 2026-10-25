@@ -1143,6 +1143,36 @@ const char* DrawRecipeMissName(DrawRecipeMiss miss) {
     return names[static_cast<std::size_t>(miss)];
 }
 
+const char* DrawRecipeRefusalName(DrawRecipeRefusal refusal) {
+    constexpr std::array<const char*, DrawRecipeRefusalCount> names{"no key", "cpu indirect", "indirect", "patched", "disabled", "no stage", "stencil replay", "quad/strip", "proxied target", "not recorded", "transitions", "not cacheable", "waited", "indirect args", "not reusable", "moved", "multisampled", "reorders samples", "built"};
+    return names[static_cast<std::size_t>(refusal)];
+}
+
+namespace {
+
+std::array<std::atomic<std::uint64_t>, DrawRecipeRefusalCount>& DrawRecipeRefusals() {
+    static std::array<std::atomic<std::uint64_t>, DrawRecipeRefusalCount> counters{};
+    return counters;
+}
+
+void RefuseDrawRecipe(std::shared_ptr<const DrawRecipe>*& recipeOut, DrawRecipeRefusal refusal) {
+    if (recipeOut == nullptr) return;
+    CountDrawRecipeRefusal(refusal);
+    recipeOut = nullptr;
+}
+
+}
+
+void CountDrawRecipeRefusal(DrawRecipeRefusal refusal) {
+    DrawRecipeRefusals()[static_cast<std::size_t>(refusal)].fetch_add(1, std::memory_order_relaxed);
+}
+
+std::array<std::uint64_t, DrawRecipeRefusalCount> TakeDrawRecipeRefusals() {
+    std::array<std::uint64_t, DrawRecipeRefusalCount> counts{};
+    for (std::size_t i = 0; i < DrawRecipeRefusalCount; ++i) counts[i] = DrawRecipeRefusals()[i].exchange(0, std::memory_order_relaxed);
+    return counts;
+}
+
 namespace {
 
 // APS5_PROFILE_DRAW: the per-phase timers of one draw (DrawPhase), shared by Draw's parts and
@@ -2505,9 +2535,9 @@ bool prepareDraw(const Context& context, const State& state, const Pm4::DrawPara
         }
         Require(static_cast<std::uint64_t>(draw.firstInstance) + draw.instanceCount <= 0x100000000ull && (draw.indexed || static_cast<std::uint64_t>(draw.firstVertex) + draw.indexCount <= 0x100000000ull), "stencil replay draw indices overflow");
         Require(state.samples == 1u && (!state.depth || HasStencil(state.depth->format)), "stencil replay requires single-sample rendering and an eight-bit stencil format");
-        recipeOut = nullptr;
+        RefuseDrawRecipe(recipeOut, DrawRecipeRefusal::StencilReplay);
     }
-    if (state.quadList || StripPatches(state, shaders)) recipeOut = nullptr;
+    if (state.quadList || StripPatches(state, shaders)) RefuseDrawRecipe(recipeOut, DrawRecipeRefusal::QuadOrStrip);
     if (context.recorder != nullptr) context.recorder->BoundKeptBytes();
     auto& timing = prepared.timing.emplace("Graphics.Draw");
     // APS5_PROFILE_DRAW prints the time of each phase of the draw (microseconds) and the [draws] totals.
@@ -2804,7 +2834,7 @@ bool prepareDraw(const Context& context, const State& state, const Pm4::DrawPara
     // The state is copied only when a mask must change.
     auto& masked = prepared.masked;
     masked = maskedState(state, inputs.fragmentOutputs);
-    if (std::any_of(targets.begin(), targets.end(), [](const TargetBinding& binding) { return binding.proxied; })) recipeOut = nullptr;
+    if (std::any_of(targets.begin(), targets.end(), [](const TargetBinding& binding) { return binding.proxied; })) RefuseDrawRecipe(recipeOut, DrawRecipeRefusal::ProxiedTarget);
     for (std::size_t index = 0; index < targets.size(); ++index) {
         if (!targets[index].proxied) continue;
         if (!masked.has_value()) masked = state;
@@ -2926,7 +2956,9 @@ void recordPreparedDraw(const Context& context, const State& state, const Pm4::D
         // only a template the resource cache serves under this content key (reusable: no lease,
         // no copied writes, every direct region import- or mirror-served) of a direct draw, so a
         // hit's proof is the template's ProveCurrent and nothing needs completion work.
-        if (recipeOut != nullptr && DrawRecipes() && cacheable && !outcome.waited && args == nullptr && resources->Reusable() && resolved.moved.empty() && !multisampled && !pipeline->ReordersSamples()) {
+        const auto refusal = recipeOut == nullptr || !DrawRecipes() ? DrawRecipeRefusal::Count : !cacheable ? DrawRecipeRefusal::NotCacheable : outcome.waited ? DrawRecipeRefusal::Waited : args != nullptr ? DrawRecipeRefusal::IndirectArgs : !resources->Reusable() ? DrawRecipeRefusal::NotReusable : !resolved.moved.empty() ? DrawRecipeRefusal::Moved : multisampled ? DrawRecipeRefusal::Multisampled : pipeline->ReordersSamples() ? DrawRecipeRefusal::ReordersSamples : DrawRecipeRefusal::Built;
+        if (refusal != DrawRecipeRefusal::Count) CountDrawRecipeRefusal(refusal);
+        if (refusal == DrawRecipeRefusal::Built) {
             auto recipe = std::make_shared<DrawRecipe>();
             recipe->device = context.device;
             recipe->templateRef = resources;
@@ -2952,6 +2984,7 @@ void recordPreparedDraw(const Context& context, const State& state, const Pm4::D
         report(outcome.waited ? (outcome.reason == SyncLease ? " recorded then waited (lease)" : " recorded then waited (copied writes)") : completion ? " recorded with completion" : " recorded");
         return;
     }
+    if (recipeOut != nullptr) CountDrawRecipeRefusal(recorded ? DrawRecipeRefusal::Transitions : DrawRecipeRefusal::NotRecorded);
     APS5_LOG_CHARS_OUT_DEBUG("Creating CommandBatch");
     std::optional<CommandBatch> batch;
     if (!recorded) {

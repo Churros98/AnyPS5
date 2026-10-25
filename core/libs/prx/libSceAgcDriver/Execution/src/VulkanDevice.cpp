@@ -4453,6 +4453,20 @@ void noteDispatchMoveSize(std::size_t bytes) {
     moves.sizes[bucket].fetch_add(1, std::memory_order_relaxed);
 }
 
+std::string DrawRecipeRefusalText(const std::array<std::uint64_t, Graphics::DrawRecipeRefusalCount>& counts) {
+    constexpr auto firstBuild = static_cast<std::size_t>(Graphics::DrawRecipeRefusal::StencilReplay);
+    constexpr auto built = static_cast<std::size_t>(Graphics::DrawRecipeRefusal::Built);
+    std::string text = "; not requested: ";
+    char item[64];
+    for (std::size_t i = 0; i < built; ++i) {
+        if (i == firstBuild) text += "; not built: ";
+        std::snprintf(item, sizeof(item), "%s%s %llu", i == 0 || i == firstBuild ? "" : ", ", Graphics::DrawRecipeRefusalName(static_cast<Graphics::DrawRecipeRefusal>(i)), static_cast<unsigned long long>(counts[i]));
+        text += item;
+    }
+    std::snprintf(item, sizeof(item), "; built %llu", static_cast<unsigned long long>(counts[built]));
+    return text + item;
+}
+
 void reportRecipes() {
     auto& recipes = Recipes();
     const auto nowMs = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
@@ -4482,7 +4496,8 @@ void reportRecipes() {
         const auto precheckUs = perHit(counters.precheckNs);
         const auto proofUs = perHit(counters.proofNs);
         const auto recordUs = perHit(counters.recordNs);
-        AgcDriver::ProfilePrint_nid_no_patch("[recipe] %s (10 s): hits %llu; pre-check misses: %s; proofs: %s; rebuilds: %s; presyncs from the recipe %llu (recomputed %llu, waited %llu); data refreshes recorded %llu / skipped by hash %llu (%llu decided by words: data hits); restarts %llu, attaches %llu; us per hit: pre-check %.1f, proof %.1f, record %.1f; verified %llu (object replaced %llu)\n", kind == 0 ? "dispatch" : kind == 1 ? "indirect" : "draw", hits, misses.c_str(), proofs.c_str(), rebuilds.c_str(), take(counters.presyncsFromRecipe), take(counters.presyncsRecomputed), take(counters.presyncWaits), take(counters.dataRefreshed), take(counters.dataSkipped), take(counters.refreshByWords), take(counters.restarts), take(counters.attaches), precheckUs, proofUs, recordUs, take(counters.verified), take(counters.verifyReplaced));
+        const auto refusals = kind == 2 ? DrawRecipeRefusalText(Graphics::TakeDrawRecipeRefusals()) : std::string();
+        AgcDriver::ProfilePrint_nid_no_patch("[recipe] %s (10 s): hits %llu; pre-check misses: %s; proofs: %s; rebuilds: %s; presyncs from the recipe %llu (recomputed %llu, waited %llu); data refreshes recorded %llu / skipped by hash %llu (%llu decided by words: data hits); restarts %llu, attaches %llu; us per hit: pre-check %.1f, proof %.1f, record %.1f; verified %llu (object replaced %llu)%s\n", kind == 0 ? "dispatch" : kind == 1 ? "indirect" : "draw", hits, misses.c_str(), proofs.c_str(), rebuilds.c_str(), take(counters.presyncsFromRecipe), take(counters.presyncsRecomputed), take(counters.presyncWaits), take(counters.dataRefreshed), take(counters.dataSkipped), take(counters.refreshByWords), take(counters.restarts), take(counters.attaches), precheckUs, proofUs, recordUs, take(counters.verified), take(counters.verifyReplaced), refusals.c_str());
     }
 }
 

@@ -808,13 +808,21 @@ void Draw(AgcDriver::VulkanDevice& device, const Context& context, const Pass& p
         AgcDriver::Graphics::Draw(context, state, draw, shaders);
         return;
     }
+    using AgcDriver::Graphics::DrawRecipeRefusal;
+    AgcDriver::Graphics::TakeDrawRecipeRefusals();
     std::shared_ptr<const AgcDriver::DrawRecipe> recipe;
     AgcDriver::Graphics::Draw(context, state, draw, shaders, {}, &recipe);
+    const auto refusals = AgcDriver::Graphics::TakeDrawRecipeRefusals();
+    std::uint64_t counted = 0;
+    for (const auto count : refusals) counted += count;
+    Require(counted == 1u, "a draw asked for a recipe did not count exactly one recipe outcome");
     if (pass.buildsNoRecipe) {
         Require(recipe == nullptr, "a draw that reorders its samples built a recipe");
+        Require(refusals[static_cast<std::size_t>(DrawRecipeRefusal::ReordersSamples)] == 1u, "a draw that reorders its samples did not count its recipe refusal as reorders samples");
         return;
     }
     Require(recipe != nullptr, "the recorded draw built no recipe");
+    Require(refusals[static_cast<std::size_t>(DrawRecipeRefusal::Built)] == 1u, "the recorded draw did not count its recipe as built");
     pass.beforeReplay();
     const auto replayed = AgcDriver::Graphics::DrawWithRecipe(context, state, draw, shaders, {}, *recipe);
     Require(replayed.recorded, std::string("the draw did not replay its recipe: ") + AgcDriver::Graphics::DrawRecipeMissName(replayed.miss));
